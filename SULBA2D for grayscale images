@@ -49,7 +49,7 @@ class SULBA2D(object):
                        for i in iteration_stepW])).squeeze(0)).permute(2, 1, 0)
         
         # Randomly choose between height or width permutation
-        new_samples = [new_samplesW, new_samplesH]
+        new_samples = [new_samplesH, new_samplesW]
         new_sample = random.choice(new_samples)
         
         return new_sample
