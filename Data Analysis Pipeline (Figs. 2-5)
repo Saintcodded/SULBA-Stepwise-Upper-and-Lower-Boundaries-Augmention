@@ -1,0 +1,1293 @@
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+import seaborn as sns
+from scipy import stats
+from pathlib import Path
+from matplotlib.patches import Patch
+import colorsys
+import warnings
+warnings.filterwarnings('ignore')
+
+# ============================================================================
+# CONFIGURATION CLASS WITH PATHS for 4 Input Files
+# ============================================================================
+class Config:
+    """Configuration settings"""
+
+    # File paths for plots a-d 
+    #(Results for all SULBA and Benchmark DA Techniques)
+    #Ensure to use the correct file setup, formatting, and arrangement, an example file is provided within this repository
+    CNN_RESULTS_ABCD_PATH = r"C:\2D CNN Classification results all datasets and techniques.xlsx"
+    SWINT_RESULTS_ABCD_PATH = r"C:\2D Swin T Classification results all datasets and techniques.xlsx"
+
+    
+    # File paths for plots e-f 
+    #SULBA combininations with Traditional Techniques (Flipping and rotation)
+    CNN_RESULTS_EF_PATH = r"C:\Users\codde\OneDrive\Desktop\SULBA Paper\2D CNN SULBA and traditional DA results all datasets and techniques.xlsx"
+    SWINT_RESULTS_EF_PATH = r"C:\Users\codde\OneDrive\Desktop\SULBA Paper\2D Swin T SULBA and traditional DA results all datasets and techniques.xlsx"
+
+    
+    # Plot settings
+    SAVE_DIR = Path("composite_figure")
+    DPI = 1200
+    
+    # figure dimensions 
+    DOUBLE_COLUMN_WIDTH = 9.5  
+    FIG_HEIGHT = 11.5  
+    
+    # Color palette for DA methods
+    METHOD_COLORS = [
+        '#1f77b4', '#ff7f0e', '#2ca02c', '#d62728', '#9467bd',
+        '#8c564b', '#e377c2', '#7f7f7f', '#bcbd22', '#17becf',
+        '#393b79', '#637939', '#8c6d31', '#843c39', '#a55194'
+    ]
+    
+    # Error bar clipping constants 
+    PERCENTAGE_CI_VISUAL_MAX = 0.3  
+    RELATIVE_CI_VISUAL_MAX = 0.3    
+    
+    # Font sizes
+    FONT_SIZES = {
+        'panel_label': 10,      # a, b, c, d, e, f labels
+        'title': 9,             # Panel titles
+        'axis': 8,              # Axis labels
+        'tick': 7,              # Tick labels
+        'legend': 7,            # Legend text
+        'annotation': 6,        # Annotations
+    }
+
+# ============================================================================
+# DATA PROCESSING FUNCTIONS 
+# ============================================================================
+def load_and_process_data(cnn_path, swint_path):
+    """Load and process data for analysis"""
+    print(f"Loading data from:\n  CNN: {cnn_path}\n  SwinT: {swint_path}")
+    
+    try:
+        # Load results
+        cnn_df = pd.read_excel(cnn_path)
+        swint_df = pd.read_excel(swint_path)
+    except Exception as e:
+        print(f"Error loading files: {e}")
+        raise
+    
+    def clean_dataframe(df, arch_name):
+        df = df.copy()
+        if 'Unnamed: 0' in df.columns:
+            df = df.rename(columns={'Unnamed: 0': 'DA_Method'})
+        
+        df_long = df.melt(
+            id_vars=['DA_Method'],
+            var_name='Dataset',
+            value_name='Score'
+        )
+        df_long['Architecture'] = arch_name
+        df_long['Score'] = pd.to_numeric(df_long['Score'], errors='coerce')
+        return df_long
+    
+    cnn_long = clean_dataframe(cnn_df, 'ResNet18')
+    swint_long = clean_dataframe(swint_df, 'Swin Transformer (Tiny)')
+    
+    combined_df = pd.concat([cnn_long, swint_long], ignore_index=True)
+    
+    # Identify baseline method
+    base_keywords = ['base', 'baseline', 'original', 'none']
+    baseline_method = None
+    for method in combined_df['DA_Method'].unique():
+        if any(keyword in method.lower() for keyword in base_keywords):
+            baseline_method = method
+            break
+    
+    if baseline_method is None:
+        baseline_method = combined_df['DA_Method'].iloc[0]
+    
+    return combined_df, baseline_method
+
+def calculate_plot2_data(df, baseline_method):
+    """Calculate data for Plot 2: Improvement Analysis Heatmap"""
+    methods = sorted([m for m in df['DA_Method'].unique() if m != baseline_method])
+    datasets = sorted(df['Dataset'].unique())
+    
+    heatmap_data = pd.DataFrame(np.nan, index=methods, columns=datasets)
+    
+    baseline_scores = {}
+    for arch in ['ResNet18', 'Swin Transformer (Tiny)']:
+        baseline_scores[arch] = {}
+        for dataset in datasets:
+            scores = df[(df['DA_Method'] == baseline_method) & 
+                       (df['Dataset'] == dataset) & 
+                       (df['Architecture'] == arch)]['Score'].values
+            baseline_scores[arch][dataset] = np.mean(scores) if len(scores) > 0 else np.nan
+    
+    for method in methods:
+        for dataset in datasets:
+            total_improvement = 0
+            valid_count = 0
+            
+            for arch in ['ResNet18', 'Swin Transformer (Tiny)']:
+                da_scores = df[(df['DA_Method'] == method) & 
+                              (df['Dataset'] == dataset) & 
+                              (df['Architecture'] == arch)]['Score'].values
+                baseline_score = baseline_scores[arch].get(dataset, np.nan)
+                
+                if len(da_scores) > 0 and not np.isnan(baseline_score):
+                    da_mean = np.mean(da_scores)
+                    total_improvement += (da_mean - baseline_score)
+                    valid_count += 1
+            
+            if valid_count > 0:
+                heatmap_data.loc[method, dataset] = total_improvement
+    
+    return heatmap_data
+
+def calculate_plot3_data(df, baseline_method):
+    """Calculate data for Plot 3: Percentage Difference"""
+    methods = sorted([m for m in df['DA_Method'].unique() if m != baseline_method])
+    datasets = sorted(df['Dataset'].unique())
+    
+    results = []
+    baseline_dict = {}
+    
+    for dataset in datasets:
+        baseline_dict[dataset] = {}
+        for arch in ['ResNet18', 'Swin Transformer (Tiny)']:
+            scores = df[(df['DA_Method'] == baseline_method) & 
+                       (df['Dataset'] == dataset) & 
+                       (df['Architecture'] == arch)]['Score'].values
+            baseline_dict[dataset][arch] = np.mean(scores) if len(scores) > 0 else np.nan
+    
+    for method in methods:
+        perc_improvements_rn = []
+        perc_improvements_swin = []
+        
+        for dataset in datasets:
+            for arch in ['ResNet18', 'Swin Transformer (Tiny)']:
+                da_scores = df[(df['DA_Method'] == method) & 
+                              (df['Dataset'] == dataset) & 
+                              (df['Architecture'] == arch)]['Score'].values
+                baseline_score = baseline_dict[dataset].get(arch, np.nan)
+                
+                if len(da_scores) > 0 and not np.isnan(baseline_score) and baseline_score > 0:
+                    da_mean = np.mean(da_scores)
+                    percentage = ((da_mean - baseline_score) / baseline_score) * 100
+                    
+                    if arch == 'ResNet18':
+                        perc_improvements_rn.append(percentage)
+                    else:
+                        perc_improvements_swin.append(percentage)
+        
+        mean_rn = np.mean(perc_improvements_rn) if perc_improvements_rn else np.nan
+        mean_swin = np.mean(perc_improvements_swin) if perc_improvements_swin else np.nan
+        sem_rn = stats.sem(perc_improvements_rn) if len(perc_improvements_rn) > 1 else 0
+        sem_swin = stats.sem(perc_improvements_swin) if len(perc_improvements_swin) > 1 else 0
+        ci_rn = 1.96 * sem_rn if len(perc_improvements_rn) > 1 else 0
+        ci_swin = 1.96 * sem_swin if len(perc_improvements_swin) > 1 else 0
+        
+        results.append({
+            'Method': method,
+            'ResNet18_Mean_Perc': mean_rn,
+            'SwinT_Mean_Perc': mean_swin,
+            'ResNet18_CI_95': ci_rn,
+            'SwinT_CI_95': ci_swin,
+        })
+    
+    return pd.DataFrame(results)
+
+def calculate_plot4_data(df, baseline_method):
+    """Calculate data for Plot 4: Relative Improvement"""
+    methods = sorted([m for m in df['DA_Method'].unique() if m != baseline_method])
+    datasets = sorted(df['Dataset'].unique())
+    
+    results = []
+    baseline_dict = {}
+    
+    for dataset in datasets:
+        baseline_dict[dataset] = {}
+        for arch in ['ResNet18', 'Swin Transformer (Tiny)']:
+            scores = df[(df['DA_Method'] == baseline_method) & 
+                       (df['Dataset'] == dataset) & 
+                       (df['Architecture'] == arch)]['Score'].values
+            baseline_dict[dataset][arch] = np.mean(scores) if len(scores) > 0 else np.nan
+    
+    for method in methods:
+        all_improvements = []
+        
+        for dataset in datasets:
+            for arch in ['ResNet18', 'Swin Transformer (Tiny)']:
+                da_scores = df[(df['DA_Method'] == method) & 
+                              (df['Dataset'] == dataset) & 
+                              (df['Architecture'] == arch)]['Score'].values
+                baseline_score = baseline_dict[dataset].get(arch, np.nan)
+                
+                if len(da_scores) > 0 and not np.isnan(baseline_score):
+                    da_mean = np.mean(da_scores)
+                    improvement = da_mean - baseline_score
+                    all_improvements.append(improvement)
+        
+        if all_improvements:
+            mean_improvement = np.mean(all_improvements)
+            sem_improvement = stats.sem(all_improvements) if len(all_improvements) > 1 else 0
+            ci_95 = 1.96 * sem_improvement if len(all_improvements) > 1 else 0
+        else:
+            mean_improvement = np.nan
+            ci_95 = 0
+        
+        results.append({
+            'Method': method,
+            'Mean_Improvement': mean_improvement,
+            'CI_95': ci_95,
+        })
+    
+    return pd.DataFrame(results)
+
+def calculate_plot5_data(df, baseline_method):
+    """Calculate data for Plot 5: Overall Performance Ranking"""
+    total_scores = df.groupby('DA_Method')['Score'].sum().reset_index()
+    total_scores.columns = ['Method', 'Total_Score']
+    total_scores = total_scores.sort_values('Total_Score', ascending=True)
+    
+    non_baseline = total_scores[total_scores['Method'] != baseline_method]
+    best_method = non_baseline.iloc[-1]['Method'] if len(non_baseline) > 0 else baseline_method
+    
+    return total_scores, best_method
+
+def generate_unique_colors(n):
+    """Generate n visually distinct colors"""
+    colors = []
+    for i in range(n):
+        hue = i / n
+        rgb = colorsys.hsv_to_rgb(hue, 0.65, 0.90)
+        colors.append(rgb)
+    return colors
+
+# ============================================================================
+# DATA PROCESSING FUNCTIONS FOR PLOTS E-F 
+# ============================================================================
+def calculate_plot_e_data(performance_df):
+    """Calculate data for Plot e: SULBA Performance Comparison"""
+    
+    # Get all SULBA methods
+    sulba_methods = [m for m in performance_df['DA_Method'].unique() if 'SULBA' in str(m)]
+    
+    # Group by probability
+    methods_by_prob = {'p=1.0': [], 'p=0.5': []}
+    
+    for method in sulba_methods:
+        if 'p=1.0' in method:
+            methods_by_prob['p=1.0'].append(method)
+        elif 'p=0.5' in method:
+            methods_by_prob['p=0.5'].append(method)
+    
+    # Sort within each probability
+    for prob in methods_by_prob:
+        methods_by_prob[prob] = sorted(methods_by_prob[prob], 
+                                      key=lambda x: ('+' not in x, x.lower()))
+    
+    # Create ordered list
+    all_methods = methods_by_prob['p=1.0'] + methods_by_prob['p=0.5']
+    
+    # Prepare data arrays
+    rn_means = []
+    rn_cis = []
+    swin_means = []
+    swin_cis = []
+    
+    for method in all_methods:
+        # Get ResNet18 data
+        rn_data = performance_df[(performance_df['DA_Method'] == method) & 
+                                 (performance_df['Architecture'] == 'ResNet18')]
+        rn_mean = rn_data['Mean'].iloc[0] if len(rn_data) > 0 else 0
+        rn_ci = rn_data['CI_95'].iloc[0] if len(rn_data) > 0 else 0
+        rn_means.append(rn_mean)
+        rn_cis.append(rn_ci)
+        
+        # Get SwinT data
+        swin_data = performance_df[(performance_df['DA_Method'] == method) & 
+                                   (performance_df['Architecture'] == 'Swin Transformer (Tiny)')]
+        swin_mean = swin_data['Mean'].iloc[0] if len(swin_data) > 0 else 0
+        swin_ci = swin_data['CI_95'].iloc[0] if len(swin_data) > 0 else 0
+        swin_means.append(swin_mean)
+        swin_cis.append(swin_ci)
+    
+    return {
+        'all_methods': all_methods,
+        'rn_means': rn_means,
+        'rn_cis': rn_cis,
+        'swin_means': swin_means,
+        'swin_cis': swin_cis,
+        'methods_by_prob': methods_by_prob
+    }
+
+def calculate_plot_f_data(impact_df):
+    """Calculate data for Plot f: SULBA Combination Impact"""
+    # Filter out rows with NaN Percent_Improvement
+    impact_df = impact_df.dropna(subset=['Percent_Improvement'])
+    
+    # Group by technique and probability
+    pivot_data = impact_df.pivot_table(index='Technique', 
+                                      columns='Probability', 
+                                      values='Percent_Improvement',
+                                      aggfunc='mean')
+    
+    # Sort by average improvement
+    pivot_data['Average'] = pivot_data.mean(axis=1)
+    pivot_data = pivot_data.sort_values('Average', ascending=False)
+    pivot_data = pivot_data.drop('Average', axis=1)
+    
+    return pivot_data, impact_df
+
+# ============================================================================
+# PERFORMANCE AND IMPACT CALCULATION FOR PLOTS E-F 
+# ============================================================================
+def calculate_performance_data(df, baseline_method='Base Model'):
+    """Calculate performance comparison data (for plots e-f)"""
+    
+    all_methods = df['DA_Method'].unique()
+    results = []
+    
+    for method in all_methods:
+        for arch in df['Architecture'].unique():
+            scores = df[(df['DA_Method'] == method) & 
+                       (df['Architecture'] == arch)]['Score'].values
+            
+            if len(scores) > 0:
+                mean_score = np.mean(scores)
+                sem_score = stats.sem(scores) if len(scores) > 1 else 0
+                ci_95 = 1.96 * sem_score if len(scores) > 1 else 0
+                
+                results.append({
+                    'DA_Method': method,
+                    'Architecture': arch,
+                    'Mean': mean_score,
+                    'SEM': sem_score,
+                    'CI_95': ci_95,
+                    'N': len(scores)
+                })
+    
+    return pd.DataFrame(results)
+
+def calculate_combination_impact(df):
+    """Calculate impact of combining traditional techniques with SULBA (for plots e-f)"""
+    
+    sulba_methods = [m for m in df['DA_Method'].unique() if 'SULBA' in str(m)]
+    sulba_alone = [m for m in sulba_methods if '+' not in m]
+    sulba_combinations = [m for m in sulba_methods if '+' in m]
+    
+    results = []
+    
+    for prob in ['p=1.0', 'p=0.5']:
+        # Find SULBA alone for this probability
+        sulba_alone_methods = [m for m in sulba_alone if prob in m]
+        
+        if not sulba_alone_methods:
+            continue
+        
+        sulba_alone_method = sulba_alone_methods[0]
+        
+        # Get SULBA alone scores by dataset and architecture
+        sulba_scores = {}
+        for arch in df['Architecture'].unique():
+            sulba_scores[arch] = {}
+            for dataset in df['Dataset'].unique():
+                scores = df[(df['DA_Method'] == sulba_alone_method) & 
+                          (df['Dataset'] == dataset) & 
+                          (df['Architecture'] == arch)]['Score'].values
+                sulba_scores[arch][dataset] = np.mean(scores) if len(scores) > 0 else np.nan
+        
+        # Find combinations for this probability
+        combination_methods = [m for m in sulba_combinations if prob in m]
+        
+        for comb_method in combination_methods:
+            # Extract technique name
+            if '+' in comb_method:
+                technique = comb_method.split('+')[0].strip()
+            else:
+                technique = 'SULBA Alone'
+            
+            improvements = []
+            
+            for dataset in df['Dataset'].unique():
+                for arch in df['Architecture'].unique():
+                    comb_scores = df[(df['DA_Method'] == comb_method) & 
+                                   (df['Dataset'] == dataset) & 
+                                   (df['Architecture'] == arch)]['Score'].values
+                    sulba_score = sulba_scores[arch].get(dataset, np.nan)
+                    
+                    if len(comb_scores) > 0 and not np.isnan(sulba_score):
+                        comb_mean = np.mean(comb_scores)
+                        improvement = comb_mean - sulba_score
+                        improvements.append(improvement)
+                        
+            if improvements:
+                mean_improvement = np.mean(improvements)
+                sem_improvement = stats.sem(improvements) if len(improvements) > 1 else 0
+                ci_95 = 1.96 * sem_improvement if len(improvements) > 1 else 0
+                
+                # Calculate percentage improvement
+                baseline_mean = np.mean(list(sulba_scores[arch].values()))
+                if not np.isnan(baseline_mean) and baseline_mean != 0:
+                    perc_improvement = (mean_improvement / baseline_mean * 100)
+                else:
+                    perc_improvement = 0
+            else:
+                mean_improvement = np.nan
+                sem_improvement = 0
+                ci_95 = 0
+                perc_improvement = 0
+            
+            results.append({
+                'Probability': prob,
+                'Technique': technique,
+                'Combination_Method': comb_method,
+                'Mean_Improvement': mean_improvement,
+                'SEM_Improvement': sem_improvement,
+                'CI_95_Improvement': ci_95,
+                'Percent_Improvement': perc_improvement,
+                'N_Comparisons': len(improvements)
+            })
+    
+    return pd.DataFrame(results)
+
+# ============================================================================
+# PRINT DATA FUNCTIONS
+# ============================================================================
+def print_plot_a_data(heatmap_data):
+    """Print data for Plot a: Improvement heatmap"""
+    print("\n" + "="*80)
+    print("PLOT A DATA: IMPROVEMENT HEATMAP")
+    print("="*80)
+    print("\nHeatmap Data (Method × Dataset):")
+    print("-"*80)
+    with pd.option_context('display.max_rows', None, 'display.max_columns', None,
+                          'display.width', 1000, 'display.float_format', '{:+.3f}'.format):
+        print(heatmap_data)
+
+def print_plot_b_data(perc_df):
+    """Print data for Plot b: Percentage difference"""
+    print("\n" + "="*80)
+    print("PLOT B DATA: PERCENTAGE DIFFERENCE")
+    print("="*80)
+    print("\nPercentage Improvement Data:")
+    print("-"*80)
+    with pd.option_context('display.max_rows', None, 'display.width', 1000):
+        print(perc_df.to_string(index=False, float_format=lambda x: f"{x:.3f}" if abs(x) < 1000 else f"{x:.1f}"))
+
+def print_plot_c_data(rel_df):
+    """Print data for Plot c: Relative improvement"""
+    print("\n" + "="*80)
+    print("PLOT C DATA: RELATIVE IMPROVEMENT")
+    print("="*80)
+    print("\nRelative Improvement Data:")
+    print("-"*80)
+    with pd.option_context('display.max_rows', None, 'display.width', 1000):
+        print(rel_df.to_string(index=False, float_format=lambda x: f"{x:.3f}" if abs(x) < 1000 else f"{x:.1f}"))
+
+def print_plot_d_data(plot5_data, best_method):
+    """Print data for Plot d: Overall ranking"""
+    print("\n" + "="*80)
+    print("PLOT D DATA: OVERALL RANKING")
+    print("="*80)
+    print("\nRanking Data:")
+    print("-"*80)
+    ranking_df = plot5_data.sort_values('Total_Score', ascending=False).reset_index(drop=True)
+    ranking_df['Rank'] = ranking_df.index + 1
+    with pd.option_context('display.max_rows', None, 'display.width', 1000):
+        print(ranking_df[['Rank', 'Method', 'Total_Score']].to_string(index=False, 
+                                                                    float_format=lambda x: f"{x:.3f}"))
+    print(f"\nBest Method: {best_method}")
+
+def print_plot_e_data(plot_e_data):
+    """Print data for Plot e: SULBA Performance Comparison"""
+    print("\n" + "="*80)
+    print("PLOT E DATA: SULBA PERFORMANCE COMPARISON")
+    print("="*80)
+    
+    print("\nSULBA Methods by Probability:")
+    print("-"*80)
+    for prob, methods in plot_e_data['methods_by_prob'].items():
+        print(f"\n{prob}:")
+        for method in methods:
+            print(f"  - {method}")
+    
+    print("\nPerformance Data:")
+    print("-"*80)
+    print("\nMethod, ResNet18 Mean, ResNet18 CI, Swin Transformer Mean, Swin Transformer CI")
+    for i, method in enumerate(plot_e_data['all_methods']):
+        print(f"{method}, {plot_e_data['rn_means'][i]:.3f}, {plot_e_data['rn_cis'][i]:.3f}, "
+              f"{plot_e_data['swin_means'][i]:.3f}, {plot_e_data['swin_cis'][i]:.3f}")
+
+def print_plot_f_data(plot_f_data):
+    """Print data for Plot f: SULBA Combination Impact"""
+    print("\n" + "="*80)
+    print("PLOT F DATA: SULBA COMBINATION IMPACT")
+    print("="*80)
+    
+    pivot_data, impact_df = plot_f_data
+    
+    print("\nPivot Table Data (Technique × Probability):")
+    print("-"*80)
+    with pd.option_context('display.max_rows', None, 'display.max_columns', None,
+                          'display.width', 1000, 'display.float_format', '{:+.3f}'.format):
+        print(pivot_data)
+    
+    print("\nDetailed Impact Data:")
+    print("-"*80)
+    with pd.option_context('display.max_rows', None, 'display.width', 1000):
+        print(impact_df.to_string(index=False, float_format=lambda x: f"{x:.3f}" if abs(x) < 1000 else f"{x:.1f}"))
+
+def print_dataset_summary(df_abcd, df_ef, baseline_method):
+    """Print dataset summary"""
+    print("\n" + "="*80)
+    print("DATASET SUMMARY")
+    print("="*80)
+    
+    print(f"\nPanels a-d Dataset:")
+    print(f"  Total samples: {len(df_abcd)}")
+    print(f"  Data augmentation methods: {df_abcd['DA_Method'].nunique()}")
+    print(f"  Datasets: {df_abcd['Dataset'].nunique()}")
+    print(f"  Architectures: {df_abcd['Architecture'].nunique()}")
+    print(f"  Baseline method: {baseline_method}")
+    
+    print(f"\nPanels e-f Dataset:")
+    print(f"  Total samples: {len(df_ef)}")
+    print(f"  Data augmentation methods: {df_ef['DA_Method'].nunique()}")
+    print(f"  Datasets: {df_ef['Dataset'].nunique()}")
+    print(f"  Architectures: {df_ef['Architecture'].nunique()}")
+
+# ============================================================================
+# PLOTTING FUNCTIONS FOR PANELS A-D 
+# ============================================================================
+def create_subplot_a(ax, heatmap_data):
+    """Create subplot a: Improvement heatmap with boxed cells"""
+    
+    # Clean method names
+    heatmap_data.index = heatmap_data.index.str.strip()
+    
+    data = heatmap_data.values
+    n_rows, n_cols = data.shape
+    
+    vmax = max(abs(np.nanmin(data)), abs(np.nanmax(data)))
+    
+    # Draw heatmap
+    im = ax.imshow(
+        data,
+        cmap='RdBu_r',
+        vmin=-vmax,
+        vmax=vmax,
+        aspect='auto'
+    )
+    
+    # Colorbar
+    cbar = plt.colorbar(im, ax=ax, shrink=0.8, pad=0.02)
+    cbar.ax.tick_params(labelsize=Config.FONT_SIZES['tick'])
+    
+    # Major ticks at cell centers
+    ax.set_xticks(np.arange(n_cols))
+    ax.set_yticks(np.arange(n_rows))
+    
+    ax.set_xticklabels(
+        heatmap_data.columns,
+        rotation=45,
+        ha='right',
+        fontsize=Config.FONT_SIZES['tick'] - 1
+    )
+    ax.set_yticklabels(
+        heatmap_data.index,
+        fontsize=Config.FONT_SIZES['tick'] - 1
+    )
+    
+    # Remove default grid and ticks outside cells
+    ax.grid(False)
+    ax.tick_params(bottom=False, left=False)
+    
+    # Draw boxes around each cell
+    for i in range(n_rows):
+        for j in range(n_cols):
+            rect = plt.Rectangle(
+                (j - 0.5, i - 0.5),  # bottom-left corner
+                1, 1,                 # width & height
+                fill=False,
+                edgecolor='black',
+                linewidth=0.5
+            )
+            ax.add_patch(rect)
+    
+    # Cell annotations (centered)
+    for i in range(n_rows):
+        for j in range(n_cols):
+            value = data[i, j]
+            if not np.isnan(value):
+                color = 'white' if abs(value) > 0.5 * vmax else 'black'
+                ax.text(
+                    j,
+                    i,
+                    f'{value:+.1f}',
+                    ha='center',
+                    va='center',
+                    fontsize=Config.FONT_SIZES['annotation'],
+                    color=color
+                )
+    
+    # Title
+    ax.set_title(
+        'ResNet18 + Swin Transformer (Tiny)',
+        fontsize=Config.FONT_SIZES['axis'],
+        pad=10
+    )
+    
+    # Panel label
+    ax.text(
+        -0.20, 1.10, 'a',
+        transform=ax.transAxes,
+        fontsize=Config.FONT_SIZES['panel_label'],
+        fontweight='bold',
+        va='top',
+        ha='right'
+    )
+    
+    return ax
+
+def create_subplot_b(ax, perc_df):
+    """Create subplot b: Percentage difference (Plot 3)"""
+    
+    perc_df = perc_df.sort_values('ResNet18_Mean_Perc', ascending=False)
+    
+    all_ci = np.concatenate([
+        perc_df['ResNet18_CI_95'].values,
+        perc_df['SwinT_CI_95'].values
+    ])
+    max_ci = all_ci.max()
+    
+    if max_ci > Config.PERCENTAGE_CI_VISUAL_MAX:
+        scale_factor = Config.PERCENTAGE_CI_VISUAL_MAX / max_ci
+    else:
+        scale_factor = 1.0
+    
+    resnet_ci_scaled = perc_df['ResNet18_CI_95'] * scale_factor
+    swint_ci_scaled = perc_df['SwinT_CI_95'] * scale_factor
+    
+    x = np.arange(len(perc_df))
+    width = 0.35
+    
+    ax.bar(x - width/2, perc_df['ResNet18_Mean_Perc'], width,
+          color=Config.METHOD_COLORS[:len(perc_df)],
+          edgecolor='black', linewidth=1.0,
+          alpha=0.9, yerr=resnet_ci_scaled,
+          error_kw={'ecolor': 'black', 'linewidth': 1.0, 'capsize': 3})
+    
+    ax.bar(x + width/2, perc_df['SwinT_Mean_Perc'], width,
+          color=Config.METHOD_COLORS[:len(perc_df)],
+          edgecolor='black', linewidth=1.0,
+          hatch='...', alpha=0.9, yerr=swint_ci_scaled,
+          error_kw={'ecolor': 'black', 'linewidth': 1.0, 'capsize': 3})
+    
+    ax.axhline(y=0, color='black', linestyle='-', alpha=0.5, linewidth=0.8)
+    
+    ax.set_xlabel('')
+    ax.set_ylabel('Improvement over Baseline (%)', fontsize=Config.FONT_SIZES['axis'])
+    ax.set_xticks(x)
+    ax.set_xticklabels(perc_df['Method'], rotation=45, ha='right',
+                      fontsize=Config.FONT_SIZES['tick'] - 1)
+    
+    legend_elements = [
+        Patch(facecolor='gray', edgecolor='black', linewidth=1.0,
+              label='ResNet18'),
+        Patch(facecolor='gray', edgecolor='black', linewidth=1.0,
+              hatch='...', label='Swin Transformer')
+    ]
+    ax.legend(handles=legend_elements, fontsize=Config.FONT_SIZES['legend'] - 1,
+             frameon=True, framealpha=0.9, loc='upper right')
+    
+    ax.grid(True, axis='y', alpha=0.3, linestyle='--', linewidth=0.5)
+    
+    ax.text(-0.20, 1.10, 'b', transform=ax.transAxes,
+           fontsize=Config.FONT_SIZES['panel_label'], fontweight='bold',
+           va='top', ha='right')
+
+def create_subplot_c(ax, rel_df):
+    """Create subplot c: Relative improvement (Plot 4)"""
+    
+    rel_df = rel_df.sort_values('Mean_Improvement', ascending=False)
+    
+    max_ci = rel_df['CI_95'].max()
+    
+    if max_ci > Config.RELATIVE_CI_VISUAL_MAX:
+        scale_factor = Config.RELATIVE_CI_VISUAL_MAX / max_ci
+    else:
+        scale_factor = 1.0
+    
+    ci_scaled = rel_df['CI_95'] * scale_factor
+    
+    x = np.arange(len(rel_df))
+    colors = ['#2ca02c' if imp >= 0 else '#d62728' 
+             for imp in rel_df['Mean_Improvement']]
+    
+    ax.bar(x, rel_df['Mean_Improvement'], color=colors,
+          edgecolor='black', linewidth=1.0,
+          alpha=0.8, yerr=ci_scaled,
+          error_kw={'ecolor': 'black', 'linewidth': 1.0, 'capsize': 3})
+    
+    ax.axhline(y=0, color='black', linestyle='-', alpha=0.5, linewidth=0.8)
+    
+    ax.set_xlabel('')  # Remove "Data Augmentation Methods"
+    ax.set_ylabel('Relative Improvement (score points)', fontsize=Config.FONT_SIZES['axis'])  # Single line
+    ax.set_xticks(x)
+    ax.set_xticklabels(rel_df['Method'], rotation=45, ha='right',
+                      fontsize=Config.FONT_SIZES['tick'] - 1)
+    
+    legend_elements = [
+        Patch(facecolor='#2ca02c', edgecolor='black', 
+              linewidth=1.0, label='Positive'),
+        Patch(facecolor='#d62728', edgecolor='black',
+              linewidth=1.0, label='Negative')
+    ]
+    ax.legend(handles=legend_elements, fontsize=Config.FONT_SIZES['legend'] - 1,
+             title='Improvement', title_fontsize=Config.FONT_SIZES['legend'] - 1,
+             frameon=True, framealpha=0.9, loc='upper right')
+    
+    ax.grid(True, axis='y', alpha=0.3, linestyle='--', linewidth=0.5)
+    
+    ax.text(-0.20, 1.00, 'c', transform=ax.transAxes,
+           fontsize=Config.FONT_SIZES['panel_label'], fontweight='bold',  
+           va='top', ha='right')
+
+def create_subplot_d(ax, total_scores, best_method, baseline_method):
+    """Create subplot d: Overall ranking (Plot 5) - Polar plot"""
+
+    methods = total_scores['Method'].tolist()
+    scores = total_scores['Total_Score'].tolist()
+    n_methods = len(methods)
+
+    colors = generate_unique_colors(n_methods)
+    method_colors = dict(zip(methods, colors))
+
+    min_score = min(scores)
+    max_score = max(scores)
+    normalized_scores = [
+        (s - min_score) / (max_score - min_score) * 0.7 + 0.2
+        for s in scores
+    ]
+
+    angles = np.linspace(0, 2 * np.pi, n_methods, endpoint=False)
+    width = 2 * np.pi / n_methods * 0.85
+
+    # ===============================
+    # OUTER CIRCULAR RING 
+    # ===============================
+    theta_ring = np.linspace(0, 2 * np.pi, 600)
+    ax.plot(
+        theta_ring,
+        np.ones_like(theta_ring),
+        linestyle='-',
+        linewidth=1.6,
+        color='black',
+        alpha=0.9,
+        zorder=2
+    )
+
+    ax.bar(
+        angles,
+        normalized_scores,
+        width=width,
+        color=colors,
+        alpha=0.9,
+        edgecolor='white',
+        linewidth=1.5,
+        zorder=3
+    )
+
+    ax.set_theta_zero_location('N')
+    ax.set_theta_direction(-1)
+
+    # ===============================
+    # ANGLE LABELS (THETA TICKS) 
+    # ===============================
+    angle_deg = np.arange(0, 360, 45)  # 0°, 45°, ..., 315°
+    ax.set_xticks(np.deg2rad(angle_deg))
+    ax.set_xticklabels([f"{d}\N{DEGREE SIGN}" for d in angle_deg],
+                       fontsize=Config.FONT_SIZES['tick'] - 1)
+
+    ax.set_ylim(0, 1)
+    ax.set_yticklabels([])
+    ax.spines['polar'].set_visible(False)
+
+    ax.text(-0.20, 1.00, 'd', transform=ax.transAxes,
+            fontsize=Config.FONT_SIZES['panel_label'], fontweight='bold',
+            va='top', ha='right')
+
+    # Create legend elements
+    legend_elements = [
+        Patch(
+            facecolor=method_colors[method],
+            edgecolor='black',
+            alpha=0.85,
+            label=method
+        )
+        for method in methods
+    ]
+
+    # Place legend BELOW the polar plot
+    n_cols = min(4, max(2, (n_methods + 3) // 4))
+
+    legend = ax.legend(
+        handles=legend_elements,
+        loc='upper center',
+        bbox_to_anchor=(0.5, -0.1),
+        fontsize=Config.FONT_SIZES['legend'] - 2,
+        frameon=True,
+        framealpha=0.95,
+        fancybox=True,
+        title='',
+        ncol=n_cols
+    )
+
+    legend.get_frame().set_alpha(0.9)
+
+    return legend
+
+PLOT_FILL_RATIO = 0.85  # Bars must occupy at least 85% of plot height
+
+def set_axis_limits_from_bars(ax, bar_values, bar_errors=None,
+                              min_usage_ratio=0.85,
+                              extra_top_frac=0.15):
+    """
+    Adjust y-limits so bars use at least `min_usage_ratio` of height,
+    with optional extra positive headroom for legends.
+    """
+    bar_values = np.asarray(bar_values)
+
+    if bar_errors is None:
+        low = bar_values.min()
+        high = bar_values.max()
+    else:
+        bar_errors = np.asarray(bar_errors)
+        low = np.min(bar_values - bar_errors)
+        high = np.max(bar_values + bar_errors)
+
+    bar_range = high - low
+    plot_range = bar_range / min_usage_ratio
+
+    padding = (plot_range - bar_range) / 2
+    y_min = low - padding
+    y_max = high + padding
+
+    # Extra positive space for legends
+    y_max += plot_range * extra_top_frac
+
+    ax.set_ylim(y_min, y_max)
+
+
+def create_subplot_e(ax, plot_e_data):
+    all_methods = plot_e_data['all_methods']
+    rn_means = np.asarray(plot_e_data['rn_means'])
+    rn_cis = np.asarray(plot_e_data['rn_cis'])
+    swin_means = np.asarray(plot_e_data['swin_means'])
+    swin_cis = np.asarray(plot_e_data['swin_cis'])
+
+    x = np.arange(len(all_methods))
+    width = 0.35
+
+    # ---- Clip error bars ----
+    all_ci = np.concatenate([rn_cis, swin_cis])
+    scale = min(1.0, Config.PERCENTAGE_CI_VISUAL_MAX / all_ci.max())
+    rn_cis *= scale
+    swin_cis *= scale
+
+    # ---- Plot bars ----
+    for i in range(len(all_methods)):
+        ax.bar(x[i] - width/2, rn_means[i], width,
+               color=Config.METHOD_COLORS[i % len(Config.METHOD_COLORS)],
+               edgecolor='black', linewidth=1.0,
+               yerr=rn_cis[i],
+               error_kw=dict(ecolor='black', capsize=3))
+
+        ax.bar(x[i] + width/2, swin_means[i], width,
+               color=Config.METHOD_COLORS[i % len(Config.METHOD_COLORS)],
+               edgecolor='black', linewidth=1.0,
+               hatch='...',
+               yerr=swin_cis[i],
+               error_kw=dict(ecolor='black', capsize=3))
+
+    ax.set_ylabel('Average Score', fontsize=Config.FONT_SIZES['axis'])
+
+    # ---- X-axis ticks and labels (show all) ----
+    ax.set_xticks(x)
+    ax.set_xticklabels(all_methods,
+                       rotation=45,
+                       ha='right',
+                       fontsize=Config.FONT_SIZES['tick'] - 1)
+
+    # ---- Axis limits (≥85% usage) ----
+    bar_vals = np.concatenate([rn_means, swin_means])
+    bar_errs = np.concatenate([rn_cis, swin_cis])
+    set_axis_limits_from_bars(ax, bar_vals, bar_errs,
+                              min_usage_ratio=0.85,
+                              extra_top_frac=0.10)
+
+    # ---- y-axis to integer ticks only ----
+    ax.yaxis.get_major_locator().set_params(integer=True)
+
+    # ---- Legend ABOVE tallest bar ----
+    from matplotlib.patches import Patch
+    
+    legend_elements = [
+        Patch(facecolor='gray', edgecolor='black', label='ResNet18'),
+        Patch(facecolor='gray', edgecolor='black', hatch='...', label='Swin Transformer (Tiny)')
+    ]
+    
+    # Get highest bar + error
+    max_data_y = max(
+        np.max(rn_means + rn_cis),
+        np.max(swin_means + swin_cis)
+    )
+    
+    # Convert data y to axes fraction
+    ymin, ymax = ax.get_ylim()
+    legend_y_frac = (max_data_y - ymin) / (ymax - ymin)
+
+    # Add small margin above data to position legend nicely
+    legend_y_frac = min(1.2, legend_y_frac)  # allows the legend to go above the axes
+
+    ax.legend(
+        handles=legend_elements,
+        loc='lower right',  # anchor bottom to make upward shift work
+        bbox_to_anchor=(0.98, legend_y_frac),
+        frameon=True,
+        framealpha=0.9,
+        fontsize=Config.FONT_SIZES['legend'] - 1
+    )
+    
+    # ---- Grid ----
+    ax.grid(axis='y', alpha=0.3, linestyle='--', linewidth=0.5)  
+
+    # ---- Panel label ----
+    ax.text(-0.20, 1.00, 'e', transform=ax.transAxes,
+            fontsize=Config.FONT_SIZES['panel_label'],
+            fontweight='bold')
+
+    return ax
+    
+def create_subplot_f(ax, pivot_data, impact_df):
+    """Create subplot f: SULBA Combination Impact (publication-ready)"""
+
+    # Bar positions
+    x = np.arange(len(pivot_data))
+    width = 0.35
+
+    # Colors for probabilities
+    colors = ['#1f77b4', '#ff7f0e']
+    probs = ['p=1.0', 'p=0.5']
+
+    # ===============================
+    # CLIP ERROR BARS 
+    # ===============================
+    all_errors = []
+    error_map = {}
+
+    for prob in probs:
+        errors = []
+        for tech in pivot_data.index:
+            row = impact_df[
+                (impact_df['Technique'] == tech) &
+                (impact_df['Probability'] == prob)
+            ]
+            if len(row) > 0:
+                err = row['CI_95_Improvement'].iloc[0]
+            else:
+                err = 0.0
+            errors.append(err)
+            all_errors.append(abs(err))
+        error_map[prob] = np.array(errors)
+
+    max_ci = max(all_errors) if all_errors else 0.0
+
+    if max_ci > Config.PERCENTAGE_CI_VISUAL_MAX:
+        scale_factor = Config.PERCENTAGE_CI_VISUAL_MAX / max_ci
+    else:
+        scale_factor = 1.0
+
+    for prob in probs:
+        error_map[prob] = error_map[prob] * scale_factor
+
+    # ===============================
+    # PLOT BARS
+    # ===============================
+    bar_heights = []
+
+    for idx, prob in enumerate(probs):
+        if prob not in pivot_data.columns:
+            continue
+
+        values = pivot_data[prob].values
+        bar_heights.extend(values)
+
+        ax.bar(
+            x + (idx * width) - width / 2,
+            values,
+            width,
+            color=colors[idx],
+            edgecolor='black',
+            linewidth=1.0,
+            alpha=0.9,
+            yerr=error_map[prob],
+            error_kw={
+                'ecolor': 'black',
+                'linewidth': 1.0,
+                'capsize': 3
+            },
+            label=prob
+        )
+
+    # ===============================
+    # AXES & LABELS
+    # ===============================
+    ax.set_ylabel('Improvement', fontsize=Config.FONT_SIZES['axis'])
+    ax.set_xticks(x)
+
+    x_labels = []
+    for label in pivot_data.index:
+        if 'Rotation' in str(label):
+            x_labels.append('Rotation\n+ SULBA')
+        elif 'Horizontal' in str(label):
+            x_labels.append('Horizontal Flip\n+ SULBA')
+        elif 'Vertical' in str(label):
+            x_labels.append('Vertical Flip\n+ SULBA')
+        elif 'Shearing' in str(label):
+            x_labels.append('Shearing\n+ SULBA')
+        elif 'Translation' in str(label):
+            x_labels.append('Translation\n+ SULBA')
+        elif 'Scaling' in str(label):
+            x_labels.append('Scaling\n+ SULBA')
+        else:
+            x_labels.append(f"{label}\n+ SULBA")
+
+    ax.set_xticklabels(
+        x_labels,
+        rotation=45,
+        ha='right',
+        fontsize=Config.FONT_SIZES['tick'] - 1
+    )
+
+    ax.axhline(0, color='black', linewidth=0.8, alpha=0.5)
+
+    # ===============================
+    # Y-LIMITS: ≥85% BAR COVERAGE
+    # + EXTENDED POSITIVE AXIS
+    # ===============================
+    if bar_heights:
+        bar_min = min(bar_heights)
+        bar_max = max(bar_heights)
+        bar_range = bar_max - bar_min if bar_max != bar_min else abs(bar_max)
+
+        # Bars occupy at least 85% of plot height
+        plot_range = bar_range / 0.85
+        padding = (plot_range - bar_range) / 2
+
+        y_min = bar_min - padding
+        y_max = bar_max + padding
+
+        # Ensure error bars are fully visible
+        max_error = max(all_errors) * scale_factor if all_errors else 0
+        y_min = min(y_min, bar_min - max_error)
+        y_max = max(y_max, bar_max + max_error)
+
+        # Extend POSITIVE y-axis ×2 for legend space
+        y_max += (y_max - y_min)
+
+    else:
+        y_min, y_max = -2, 4
+
+    #ax.set_ylim(y_min, y_max)  #adaptive
+    ax.set_ylim(-2.0, 2.0)
+
+
+    # ===============================
+    # LEGEND (positive y-space)
+    # ===============================
+    ax.legend(
+        fontsize=Config.FONT_SIZES['legend'] - 1,
+        frameon=True,
+        framealpha=0.9,
+        loc='upper right',
+        bbox_to_anchor=(0.98, 0.98),
+        title='Probability'
+    )
+
+    # ===============================
+    # GRID & PANEL LABEL
+    # ===============================
+    ax.grid(True, axis='y', alpha=0.3, linestyle='--', linewidth=0.5)
+
+    ax.text(
+        -0.20, 1.00, 'f',
+        transform=ax.transAxes,
+        fontsize=Config.FONT_SIZES['panel_label'],
+        fontweight='bold',
+        va='top', ha='right'
+    )
+
+    return ax
+
+# ============================================================================
+# MAIN FUNCTION FOR 6-PANEL FIGURE 
+# ============================================================================
+def create_6panel_figure():
+    """Create a high-resolution 6-panel composite figure """
+    
+    print("Creating 6-panel figure...")
+    print("="*60)
+    
+    # Load data for plots a-d (original files)
+    print("\n1. Loading data for panels a-d (original files)...")
+    df_abcd, baseline_method = load_and_process_data(
+        Config.CNN_RESULTS_ABCD_PATH, 
+        Config.SWINT_RESULTS_ABCD_PATH
+    )
+    
+    # Load data for plots e-f (SULBA files)
+    print("\n2. Loading data for panels e-f (SULBA files)...")
+    df_ef, _ = load_and_process_data(
+        Config.CNN_RESULTS_EF_PATH, 
+        Config.SWINT_RESULTS_EF_PATH
+    )
+    
+    print("\n3. Calculating data for panels a-d...")
+    plot2_data = calculate_plot2_data(df_abcd, baseline_method)
+    plot3_data = calculate_plot3_data(df_abcd, baseline_method)
+    plot4_data = calculate_plot4_data(df_abcd, baseline_method)
+    plot5_data, best_method = calculate_plot5_data(df_abcd, baseline_method)
+    
+    print("\n4. Calculating data for panels e-f...")
+    performance_df = calculate_performance_data(df_ef)
+    impact_df = calculate_combination_impact(df_ef)
+    plot_e_data = calculate_plot_e_data(performance_df)
+    plot_f_data = calculate_plot_f_data(impact_df)
+    
+    # ============================================================================
+    # PRINT ALL DATA
+    # ============================================================================
+    
+    print("\n" + "="*100)
+    print("PRINTING DATA FOR ALL PLOTS")
+    print("="*100)
+    
+    # Print dataset summary
+    print_dataset_summary(df_abcd, df_ef, baseline_method)
+    
+    # Print data for each plot
+    print_plot_a_data(plot2_data)
+    print_plot_b_data(plot3_data)
+    print_plot_c_data(plot4_data)
+    print_plot_d_data(plot5_data, best_method)
+    print_plot_e_data(plot_e_data)
+    print_plot_f_data(plot_f_data)
+    
+    # Set up style plotting
+    plt.rcParams.update({
+        'font.family': 'Arial',
+        'font.size': Config.FONT_SIZES['tick'],
+        'axes.titlesize': Config.FONT_SIZES['title'],
+        'axes.labelsize': Config.FONT_SIZES['axis'],
+        'xtick.labelsize': Config.FONT_SIZES['tick'],
+        'ytick.labelsize': Config.FONT_SIZES['tick'],
+        'legend.fontsize': Config.FONT_SIZES['legend'] - 1,
+        'axes.linewidth': 0.8,
+        'grid.linewidth': 0.5,
+        'lines.linewidth': 0.8,
+        'patch.linewidth': 0.8,
+    })
+    
+    # Create figure with 3x2 grid for 6 panels
+    fig_width = Config.DOUBLE_COLUMN_WIDTH
+    fig_height = Config.FIG_HEIGHT  # Taller for 3x2 grid
+    
+    fig = plt.figure(figsize=(fig_width, fig_height), dpi=Config.DPI)
+    
+    # Create a 3x2 grid for 6 panels
+    gs = fig.add_gridspec(3, 2, 
+                         height_ratios=[1, 1, 1],  # Three equal rows
+                         hspace=0.4, wspace=0.4,    # Good spacing
+                         left=0.12, right=0.98,
+                         top=0.95, bottom=0.08)     # More bottom space for polar legend
+    
+    # Create subplots for all 6 panels
+    ax1 = fig.add_subplot(gs[0, 0])  # Row 1, Col 1: Heatmap (a)
+    ax2 = fig.add_subplot(gs[0, 1])  # Row 1, Col 2: Percentage diff (b)
+    ax3 = fig.add_subplot(gs[1, 0])  # Row 2, Col 1: Relative improvement (c)
+    ax4 = fig.add_subplot(gs[1, 1], projection='polar')  # Row 2, Col 2: Ranking (d)
+    ax5 = fig.add_subplot(gs[2, 0])  # Row 3, Col 1: SULBA Performance (e)
+    ax6 = fig.add_subplot(gs[2, 1])  # Row 3, Col 2: SULBA Impact (f)
+    
+    # Create each subplot
+    print("\n5. Creating subplots...")
+    create_subplot_a(ax1, plot2_data)
+    create_subplot_b(ax2, plot3_data)
+    create_subplot_c(ax3, plot4_data)
+    
+    # Create plot d with integrated legend
+    legend = create_subplot_d(ax4, plot5_data, best_method, baseline_method)
+    
+    # Create plots e and f
+    create_subplot_e(ax5, plot_e_data)
+    create_subplot_f(ax6, plot_f_data[0], plot_f_data[1])
+    
+    # Suppress EPS transparency warning
+    warnings.filterwarnings('ignore', message='.*PostScript backend does not support transparency.*')
+    
+    # Save figure in multiple formats
+    Config.SAVE_DIR.mkdir(parents=True, exist_ok=True)
+    
+    # High-resolution PNG
+    png_path = Config.SAVE_DIR / "Fig1_6panel_DA_analysis.png"
+    plt.savefig(png_path, dpi=Config.DPI, bbox_inches='tight')
+    
+    # EPS 
+    eps_path = Config.SAVE_DIR / "Fig1_6panel_DA_analysis.eps"
+    plt.savefig(eps_path, format='eps', bbox_inches='tight')
+    
+    # PDF 
+    pdf_path = Config.SAVE_DIR / "Fig1_6panel_DA_analysis.pdf"
+    plt.savefig(pdf_path, format='pdf', bbox_inches='tight')
+    
+    # TIFF 
+    tiff_path = Config.SAVE_DIR / "Fig1_6panel_DA_analysis.tiff"
+    plt.savefig(tiff_path, format='tiff', dpi=Config.DPI, bbox_inches='tight')
+    
+    print(f"\n✓ 6-panel figure saved to: {Config.SAVE_DIR}")
+    print(f"✓ Figure dimensions: {fig_width:.2f} × {fig_height:.2f} inches")
+    print(f"✓ Panels: a, b, c, d, e, f")
+    print(f"\nFiles saved:")
+    print(f"  - PNG: {png_path}")
+    print(f"  - EPS: {eps_path}")
+    print(f"  - PDF: {pdf_path}")
+    print(f"  - TIFF: {tiff_path}")
+    
+    # Save data for verification
+    plot2_data.to_csv(Config.SAVE_DIR / "plot2_heatmap_data.csv")
+    plot3_data.to_csv(Config.SAVE_DIR / "plot3_percentage_data.csv", index=False)
+    plot4_data.to_csv(Config.SAVE_DIR / "plot4_improvement_data.csv", index=False)
+    plot5_data.to_csv(Config.SAVE_DIR / "plot5_ranking_data.csv", index=False)
+    
+    plt.show()
+    
+    return fig, {
+        'plot2_data': plot2_data,
+        'plot3_data': plot3_data,
+        'plot4_data': plot4_data,
+        'plot5_data': plot5_data,
+        'plot_e_data': plot_e_data,
+        'plot_f_data': plot_f_data,
+        'baseline_method': baseline_method,
+        'best_method': best_method
+    }
+    
+# ============================================================================
+# EXECUTION
+# ============================================================================
+if __name__ == "__main__":
+    figure, data = create_6panel_figure()
+    
+    print("\n" + "="*60)
+    print("6-PANEL FIGURE READY ")
+    print("="*60)
