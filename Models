@@ -1,7 +1,10 @@
 import torchvision
 from torchvision import models
+import segmentation_models_pytorch as smp
 from torchvision.models.swin_transformer import Swin_T_Weights
 from torchvision.models.video import swin3d_t, Swin3D_T_Weights
+
+#========== Classification Models ==========
 
 # ========== ResNet18 ==========
 def ResNet18():
@@ -150,4 +153,28 @@ def 3D_Swin_Transformer_Tiny(num_classes = NUM_CLASSES):
     # Modify final classifier
     num_ftrs = model.head.in_features
     model.head = nn.Linear(num_ftrs, NUM_CLASSES)
+    return model.to(device)
+
+#========== Segmentation Models ==========
+
+# ========== Segformer with mit_b1 ==========
+def Segformer():
+    """Create a Segformer model with pretrained weights."""
+    model = smp.Segformer(
+        encoder_name="mit_b1",
+        encoder_weights="imagenet",  # Use pretrained weights
+        in_channels=3,
+        classes=NUM_CLASSES,
+    )
+    return model.to(device)
+
+# ========== Unet with ResNet18 Encoder ==========
+def Unet():
+    """Create a U-Net model with pretrained weights."""
+    model = smp.Unet(
+        encoder_name="resnet18",
+        encoder_weights="imagenet",  # Use pretrained weights
+        in_channels=3,
+        classes=NUM_CLASSES,
+    )
     return model.to(device)
