@@ -18,7 +18,7 @@ class Config:
     # File paths for plots a-d 
     #(Results for all SULBA and Benchmark DA Techniques)
     #Ensure to use the correct file setup, formatting, and arrangement, an example file is provided within this repository
-    CNN_RESULTS_ABCD_PATH = r"C:\2D CNN Classification results all datasets and techniques.xlsx"
+    CNN_RESULTS_ABCD_PATH = r"C:\2D ResNet18 Classification results all datasets and techniques.xlsx"
     SWINT_RESULTS_ABCD_PATH = r"C:\2D Swin T Classification results all datasets and techniques.xlsx"
 
     
