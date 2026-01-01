@@ -55,3 +55,34 @@ transform = transforms.Compose([
     transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
     Cutout(n_holes=1, length=(IMG_SIZE//4), p=1.0),  
 ])
+
+
+###########################################################################
+#========== CutMix and Mixup ==========
+
+def cutmix_with_probability(inputs, labels_onehot, p=1.0):
+    """Apply CutMix with probability p."""
+    if random.random() < p:
+        cutmix = CutMix(num_classes=NUM_CLASSES)
+        return cutmix(inputs, labels_onehot)
+    return inputs, labels_onehot
+
+def mixup_with_probability(inputs, labels_onehot, p=1.0):
+    """Apply MixUp with probability p."""
+    if random.random() < p:
+        mixup = MixUp(num_classes=NUM_CLASSES)
+        return mixup(inputs, labels_onehot)
+    return inputs, labels_onehot
+
+def collate_fn(batch, p=1.0):
+    inputs, labels = default_collate(batch)
+    labels_onehot = F.one_hot(labels.squeeze().long(), num_classes=NUM_CLASSES).float()
+    #return cutmix_with_probability(inputs, labels_onehot, p=p)
+    return mixup_with_probability(inputs, labels_onehot, p=p)
+
+#========== Example Usage ==========
+dataloader = DataLoader(
+    dataset,
+    batch_size=32,
+    collate_fn=lambda batch: collate_fn(batch, p=1.0)  
+)
