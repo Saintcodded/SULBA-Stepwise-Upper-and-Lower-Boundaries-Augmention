@@ -1,0 +1,1353 @@
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+import seaborn as sns
+from scipy import stats
+from pathlib import Path
+from matplotlib.patches import Patch
+import colorsys
+import warnings
+warnings.filterwarnings('ignore')
+
+# ============================================================================
+# CONFIGURATION FOR DATA STRUCTURE
+# ============================================================================
+class Config:
+    """Configuration settings for generalization analysis"""
+    
+    # New file paths for pre-activated and from-scratch training
+    PREACT_RESULTS_PATH = r"C:\Users\codde\OneDrive\Desktop\SULBA Paper\Pre activation.xlsx"
+    SCRATCH_RESULTS_PATH = r"C:\Users\codde\OneDrive\Desktop\SULBA Paper\From Scratch.xlsx"
+    
+    # Save directory
+    SAVE_DIR = Path("generalization_analysis_figure")
+    DPI = 1200
+    
+    #  figure dimensions - 
+    DOUBLE_COLUMN_WIDTH = 9.5 
+
+    FIG_HEIGHT = 11.5  
+    
+    # Color palette - 
+    ARCHITECTURE_COLORS = {
+        'PreAct-ResNet18': '#1f77b4',
+        'PreAct-Swin Transformer (Tiny)': '#ff7f0e',
+        'PreAct-MobileNet V3': '#2ca02c',
+        'PreAct-MobileVit_xxs': '#d62728',
+        'Standard-ResNet18': '#9467bd',
+        'Standard-Swin Transformer (Tiny)': '#8c564b',
+        'Standard-MobileNet V3': '#e377c2',
+        'Standard-MobileVit_xxs': '#7f7f7f'
+    }
+    
+    METHOD_COLORS = [
+        '#1f77b4', '#ff7f0e', '#2ca02c', '#d62728', '#9467bd',
+        '#8c564b', '#e377c2', '#7f7f7f', '#bcbd22', '#17becf',
+        '#393b79', '#637939', '#8c6d31', '#843c39', '#a55194'
+    ]
+    
+    # Font sizes 
+    FONT_SIZES = {
+        'panel_label': 10,      # a, b, c, d, e, f labels - 
+        'title': 9,             # Panel titles - 
+        'axis': 8,              # Axis labels - 
+        'tick': 7,              # Tick labels - 
+        'legend': 7,            # Legend text -
+        'annotation': 6,        # Annotations - 
+    }
+    
+    # Metrics to analyze
+    METRICS = ['Accuracy', 'Sensitivity', 'Specificity', 'AUROC', 'F1 Score']
+    
+# ============================================================================
+# DATA LOADING FUNCTIONS
+# ============================================================================
+def load_improvement_data_corrected(filepath, training_type):
+    """
+    Corrected loading function for your specific Excel format.
+    """
+    print(f"Loading {training_type} data from: {filepath}")
+    
+    try:
+        # Read with no header to see raw structure
+        df = pd.read_excel(filepath, header=None)
+        print(f"  Raw data shape: {df.shape}")
+        
+        # Process each architecture section
+        processed_dfs = []
+        current_section = []
+        current_arch = None
+        
+        for idx, row in df.iterrows():
+            # Check if this row starts a new architecture section
+            cell_value = str(row.iloc[0]) if pd.notna(row.iloc[0]) else ""
+            
+            # Look for architecture names
+            if any(arch_keyword in cell_value for arch_keyword in 
+                   ['ResNet', 'Swin', 'MobileNet', 'MobileVit', 'Transformer']):
+                # Save previous section if exists
+                if current_arch and current_section:
+                    section_df = process_architecture_section(current_section, current_arch, training_type)
+                    if section_df is not None:
+                        processed_dfs.append(section_df)
+                
+                # Start new section
+                current_arch = cell_value.strip()
+                current_section = [row.tolist()]
+            elif current_arch is not None:
+                # Add to current section
+                current_section.append(row.tolist())
+        
+        # Process the last section
+        if current_arch and current_section:
+            section_df = process_architecture_section(current_section, current_arch, training_type)
+            if section_df is not None:
+                processed_dfs.append(section_df)
+        
+        if not processed_dfs:
+            raise ValueError(f"No valid data sections found in {filepath}")
+        
+        # Combine all sections
+        combined_df = pd.concat(processed_dfs, ignore_index=True)
+        
+        print(f"  Successfully loaded {len(combined_df)} data points")
+        print(f"  Architectures found: {sorted(combined_df['Architecture'].unique())}")
+        print(f"  Methods found: {sorted(combined_df['DA_Method'].unique())}")
+        
+        return combined_df
+        
+    except Exception as e:
+        print(f"Error loading data: {e}")
+        raise
+
+def process_architecture_section(section_data, arch_name, training_type):
+    """Process a single architecture section."""
+    # Convert to DataFrame
+    section_df = pd.DataFrame(section_data)
+    
+    # Find the header row (contains metric names)
+    header_row_idx = None
+    for i in range(min(10, len(section_df))):
+        row_vals = section_df.iloc[i].tolist()
+        if any(pd.notna(val) and any(metric in str(val).lower() 
+               for metric in ['accuracy', 'sensitivity', 'specificity', 'auroc', 'f1'])
+               for val in row_vals):
+            header_row_idx = i
+            break
+    
+    if header_row_idx is None:
+        print(f"    Warning: No header row found for {arch_name}")
+        return None
+    
+    # Extract data
+    header = section_df.iloc[header_row_idx].tolist()
+    data_rows = section_df.iloc[header_row_idx + 1:].reset_index(drop=True)
+    
+    # Create DataFrame with proper columns
+    data_df = pd.DataFrame(data_rows.values, columns=header)
+    
+    # Clean column names
+    data_df = data_df.rename(columns={data_df.columns[0]: 'DA_Method'})
+    data_df['DA_Method'] = data_df['DA_Method'].astype(str).str.strip()
+    
+    # Remove empty rows and Base Model rows (we'll handle separately)
+    data_df = data_df[~data_df['DA_Method'].str.contains('Base Model', case=False, na=False)]
+    data_df = data_df.dropna(subset=['DA_Method'])
+    
+    # Identify metric columns
+    metric_cols = []
+    for col in data_df.columns:
+        if col != 'DA_Method':
+            try:
+                #  Use raw string for regex pattern
+                cleaned_series = data_df[col].astype(str).str.replace(r'[^\d\.\-]', '', regex=True)
+                data_df[col] = pd.to_numeric(cleaned_series, errors='coerce')
+                if data_df[col].notna().any():
+                    metric_cols.append(col)
+            except:
+                continue
+    
+    if not metric_cols:
+        print(f"    Warning: No numeric metric columns found for {arch_name}")
+        return None
+    
+    # Melt the dataframe
+    melted_df = data_df.melt(
+        id_vars=['DA_Method'],
+        value_vars=metric_cols,
+        var_name='Metric',
+        value_name='Improvement'
+    )
+    
+    # Remove rows with NaN improvements
+    melted_df = melted_df.dropna(subset=['Improvement'])
+    
+    # Add architecture and training type
+    if training_type == 'preactivated':
+        full_arch_name = f"PreAct-{arch_name}"
+    elif training_type == 'scratch':
+        full_arch_name = f"Standard-{arch_name}"
+    else:
+        full_arch_name = f"{training_type.capitalize()}-{arch_name}"
+    
+    melted_df['Architecture'] = full_arch_name
+    melted_df['Training_Type'] = training_type
+    
+    return melted_df
+    
+def combine_preact_and_scratch(preact_df, scratch_df):
+    """Combine pre-activated and scratch training data."""
+    combined_df = pd.concat([preact_df, scratch_df], ignore_index=True)
+    return combined_df
+
+def calculate_composite_score(df):
+    """Calculate composite score as weighted average of all metrics."""
+    # Define weights for different metrics
+
+    weights = {
+        'Accuracy': 1, 
+        'Sensitivity': 1, 
+        'Specificity': 1, 
+        'AUROC': 1,
+        'F1 Score': 1, 
+    }
+    # Apply weights
+    df['Weight'] = df['Metric'].map(lambda x: weights.get(x, 0.2))
+    df['Weighted_Improvement'] = df['Improvement'] * df['Weight']
+    
+    # Group by method, architecture, and training type
+    composite_scores = df.groupby(['DA_Method', 'Architecture', 'Training_Type'])['Weighted_Improvement'].sum().reset_index()
+    composite_scores = composite_scores.rename(columns={'Weighted_Improvement': 'Composite_Score'})
+    
+    # Calculate standard error and CI
+    # For simplicity, we'll use a simplified approach
+    stats_by_group = df.groupby(['DA_Method', 'Architecture', 'Training_Type'])['Weighted_Improvement'].agg([
+        'mean', 'std', 'count'
+    ]).reset_index()
+    
+    stats_by_group['SEM'] = stats_by_group['std'] / np.sqrt(stats_by_group['count'])
+    stats_by_group['CI_95'] = 1.96 * stats_by_group['SEM']
+    
+    # Merge with composite scores
+    composite_scores = pd.merge(
+        composite_scores,
+        stats_by_group[['DA_Method', 'Architecture', 'Training_Type', 'CI_95']],
+        on=['DA_Method', 'Architecture', 'Training_Type']
+    )
+    
+    return composite_scores
+
+# ============================================================================
+# ANALYSIS FUNCTIONS FOR PLOTS
+# ============================================================================
+def calculate_improvement_heatmap(composite_df, base_method='Base Model'):
+    """Calculate improvement heatmap data for all architectures and methods."""
+    
+    # Filter out base method if present
+    methods = sorted([m for m in composite_df['DA_Method'].unique() if m != base_method])
+    architectures = sorted(composite_df['Architecture'].unique())
+    
+    # Create empty heatmap DataFrame
+    heatmap_data = pd.DataFrame(index=methods, columns=architectures)
+    
+    # Fill with composite scores
+    for method in methods:
+        for arch in architectures:
+            score_data = composite_df[(composite_df['DA_Method'] == method) & 
+                                     (composite_df['Architecture'] == arch)]
+            if len(score_data) > 0:
+                heatmap_data.loc[method, arch] = score_data['Composite_Score'].iloc[0]
+            else:
+                heatmap_data.loc[method, arch] = np.nan
+    
+    # Convert all values to numeric
+    heatmap_data = heatmap_data.apply(pd.to_numeric, errors='coerce')
+    
+    return heatmap_data
+
+def calculate_method_performance_summary(composite_df):
+    """Calculate overall performance summary for each method."""
+    # Group by method
+    grouped = composite_df.groupby('DA_Method')
+    
+    # Calculate statistics
+    summary = grouped['Composite_Score'].agg([
+        'mean', 'std', 'count', 
+        lambda x: np.percentile(x, 25),
+        lambda x: np.percentile(x, 75)
+    ]).round(3)
+    
+    summary.columns = ['Mean', 'Std', 'Count', 'Q1', 'Q3']
+    summary['SEM'] = summary['Std'] / np.sqrt(summary['Count'])
+    summary['CI_95'] = 1.96 * summary['SEM']
+    
+    # Sort by mean
+    summary = summary.sort_values('Mean', ascending=False)
+    
+    return summary
+
+def calculate_architecture_comparison(composite_df):
+    """Compare performance across different architectures."""
+    # Calculate mean and CI for each architecture
+    arch_stats = composite_df.groupby('Architecture')['Composite_Score'].agg([
+        'mean', 'std', 'count'
+    ]).round(3)
+    
+    arch_stats.columns = ['Mean', 'Std', 'Count']
+    arch_stats['SEM'] = arch_stats['Std'] / np.sqrt(arch_stats['Count'])
+    arch_stats['CI_95'] = 1.96 * arch_stats['SEM']
+    
+    return arch_stats
+
+def calculate_training_difference(composite_df):
+    """Calculate Scratch - Pre-activated difference for each method."""
+    
+    # Separate data
+    preact_df = composite_df[composite_df['Training_Type'] == 'preactivated']
+    scratch_df = composite_df[composite_df['Training_Type'] == 'scratch']
+    
+    # Calculate means
+    preact_means = preact_df.groupby('DA_Method')['Composite_Score'].mean()
+    scratch_means = scratch_df.groupby('DA_Method')['Composite_Score'].mean()
+    
+    # Calculate differences
+    differences = []
+    methods = []
+    
+    for method in preact_means.index:
+        if method in scratch_means.index:
+            diff = scratch_means[method] - preact_means[method]
+            differences.append(diff)
+            methods.append(method)
+    
+    diff_df = pd.DataFrame({
+        'DA_Method': methods,
+        'Difference': differences
+    })
+    
+    return diff_df.sort_values('Difference', ascending=False)
+
+# ============================================================================
+# FUNCTION F FOR COLOR GENERATION
+# ============================================================================
+def generate_unique_colors(n):
+    """Generate n visually distinct colors"""
+    colors = []
+    for i in range(n):
+        hue = i / n
+        rgb = colorsys.hsv_to_rgb(hue, 0.65, 0.90)
+        colors.append(rgb)
+    return colors
+
+# ============================================================================
+# PLOTTING FUNCTIONS 
+# ============================================================================
+def create_plot_improvement_heatmap(ax, heatmap_data):
+    """Create improvement heatmap for all architectures and methods."""
+    
+    # Clean up method names
+    heatmap_data.index = heatmap_data.index.str.strip()
+    
+    # Convert to numpy array for processing
+    data_array = heatmap_data.values
+    
+    # Find max absolute value for symmetric colormap
+    # Filter out NaN values safely
+    flat_data = data_array.flatten()
+    
+    # Convert to numeric and filter NaN
+    numeric_data = []
+    for val in flat_data:
+        try:
+            num_val = float(val)
+            if not np.isnan(num_val):
+                numeric_data.append(num_val)
+        except:
+            continue
+    
+    if len(numeric_data) > 0:
+        vmax = max(abs(np.nanmin(numeric_data)), abs(np.nanmax(numeric_data)))
+        if vmax == 0:
+            vmax = 1
+    else:
+        vmax = 1
+    
+    # Create heatmap with RdBu_r colormap
+    im = ax.imshow(data_array, cmap='RdBu_r', aspect='auto',
+                  vmin=-vmax, vmax=vmax)
+    
+    # Add colorbar
+    cbar = plt.colorbar(im, ax=ax, shrink=0.8, pad=0.02)
+    cbar.ax.tick_params(labelsize=Config.FONT_SIZES['tick'])
+    cbar.set_label('Composite Score', fontsize=Config.FONT_SIZES['axis'] - 1)
+    
+    # Set ticks and labels
+    n_rows, n_cols = data_array.shape
+    
+    ax.set_xticks(np.arange(n_cols))
+    ax.set_yticks(np.arange(n_rows))
+    
+    # Use actual architecture names from data
+    ax.set_xticklabels(heatmap_data.columns, rotation=45, ha='right', 
+                      fontsize=Config.FONT_SIZES['tick'] - 1)
+    ax.set_yticklabels(heatmap_data.index, fontsize=Config.FONT_SIZES['tick'] - 1)
+    
+    # Remove default grid and ticks outside cells
+    ax.grid(False)
+    ax.tick_params(bottom=False, left=False)
+    
+    # Draw boxes around each cell
+    for i in range(n_rows):
+        for j in range(n_cols):
+            rect = plt.Rectangle(
+                (j - 0.5, i - 0.5), 1, 1,
+                fill=False,
+                edgecolor='black',
+                linewidth=0.5
+            )
+            ax.add_patch(rect)
+    
+    # Cell annotations (centered)
+    for i in range(n_rows):
+        for j in range(n_cols):
+            value = data_array[i, j]
+            # Safely check if value is numeric and not NaN
+            try:
+                num_val = float(value)
+                if not np.isnan(num_val):
+                    color = 'white' if abs(num_val) > 0.5 * vmax else 'black'
+                    ax.text(
+                        j, i, f'{num_val:+.2f}',
+                        ha='center', va='center',
+                        fontsize=Config.FONT_SIZES['annotation'],
+                        color=color
+                    )
+            except:
+                continue
+
+    ax.text(-0.1, 1.05, 'a', transform=ax.transAxes, 
+           fontsize=Config.FONT_SIZES['panel_label'], fontweight='bold',
+           va='top', ha='right')
+    
+    return ax
+
+def create_plot_generalization_boxplot(ax, composite_df):
+    """Create box plot showing performance distribution across architectures for each method."""
+    
+    # Get all methods except Base Model
+    methods = sorted([m for m in composite_df['DA_Method'].unique() if m != 'Base Model'])
+    
+    # Calculate statistics for each method
+    method_stats = []
+    for method in methods:
+        method_data = composite_df[composite_df['DA_Method'] == method]
+        scores = method_data['Composite_Score'].values
+        
+        if len(scores) > 0:
+            mean_val = np.mean(scores)
+            if mean_val == 0:
+                cv_val = 0
+            else:
+                cv_val = abs(np.std(scores) / mean_val)
+            
+            stats = {
+                'method': method,
+                'mean': mean_val,
+                'median': np.median(scores),
+                'std': np.std(scores),
+                'min': np.min(scores),
+                'max': np.max(scores),
+                'n': len(scores),
+                'range': np.max(scores) - np.min(scores),
+                'cv': cv_val
+            }
+            method_stats.append(stats)
+    
+    # Convert to DataFrame and sort by mean performance
+    stats_df = pd.DataFrame(method_stats)
+    stats_df = stats_df.sort_values('mean', ascending=False)
+    
+    # Prepare box plot data in sorted order
+    box_data = []
+    sorted_methods = stats_df['method'].tolist()
+    for method in sorted_methods:
+        scores = composite_df[composite_df['DA_Method'] == method]['Composite_Score'].values
+        box_data.append(scores)
+    
+    # Create box plot
+    positions = np.arange(len(box_data))
+    bp = ax.boxplot(box_data, positions=positions, widths=0.6, patch_artist=True)
+    
+    # Color boxes based on median performance
+    for i, box in enumerate(bp['boxes']):
+        median = stats_df.iloc[i]['median']
+        if median > 0:
+            box.set_facecolor('#d4edda')  # Light green
+            box.set_edgecolor('#28a745')  # Dark green
+        elif median < 0:
+            box.set_facecolor('#f8d7da')  # Light red
+            box.set_edgecolor('#dc3545')  # Dark red
+        else:
+            box.set_facecolor('#e9ecef')  # Light gray
+            box.set_edgecolor('#6c757d')  # Dark gray
+        box.set_alpha(0.8)
+    
+    # Customize whiskers, caps, and median lines
+    for whisker in bp['whiskers']:
+        whisker.set(color='black', linewidth=1.0, linestyle='-')
+    
+    for cap in bp['caps']:
+        cap.set(color='black', linewidth=1.0)
+    
+    for median in bp['medians']:
+        median.set(color='black', linewidth=1.5)
+    
+    # Consistent outlier circles (filled circles)
+    for flier in bp['fliers']:
+        flier.set(marker='o', color='black', alpha=0.6, markersize=4, 
+                 markerfacecolor='black', markeredgecolor='black')
+    
+    # Add mean points (diamonds)
+    means = stats_df['mean'].values
+    ax.scatter(positions, means, color='black', s=40, zorder=3, marker='D')
+    
+    # Add zero line
+    ax.axhline(y=0, color='black', linestyle='--', linewidth=0.8, alpha=0.5)
+    
+    # Set labels and formatting
+    ax.set_xticks(positions)
+    
+    # Shorten long method labels for better display
+    display_labels = []
+    for label in sorted_methods:
+        if len(label) > 20:
+            short = (label.replace(' (', '(')
+                     .replace('Horizontal', 'Horiz')
+                     .replace('Vertical', 'Vert')
+                     .replace('Random Erasing', 'RandErase')
+                     .replace('Rotation', 'Rot'))
+            if len(short) > 20:
+                short = short[:18] + '...'
+            display_labels.append(short)
+        else:
+            display_labels.append(label)
+    
+    ax.set_xticklabels(display_labels, rotation=45, ha='right',
+                      fontsize=Config.FONT_SIZES['tick'] - 1)
+    ax.set_ylabel('Composite Score', fontsize=Config.FONT_SIZES['axis'])
+    ax.grid(True, alpha=0.3, axis='y')
+    
+    # CV LABEL POSITIONING
+    all_data_points = []
+    for scores in box_data:
+        all_data_points.extend(scores)
+    
+    if len(all_data_points) > 0:
+        data_max = max(all_data_points)
+        data_min = min(all_data_points)
+        data_range = data_max - data_min
+        
+        if data_range > 0:
+            cv_label_y = data_max + (data_range * 0.08)
+        else:
+            cv_label_y = data_max + 0.5
+        
+        y_max_target = cv_label_y * 1.15
+        
+        # Add CV values for all methods
+        for i, (pos, cv) in enumerate(zip(positions, stats_df['cv'].values)):
+            if not np.isnan(cv) and not np.isinf(cv):
+                if cv >= 100:
+                    cv_text = f'{cv:.0f}'
+                elif cv >= 10:
+                    cv_text = f'{cv:.1f}'
+                else:
+                    cv_text = f'{cv:.2f}'
+                
+                ax.text(pos, cv_label_y, 
+                       cv_text, 
+                       ha='center', 
+                       fontsize=Config.FONT_SIZES['annotation'],
+                       bbox=dict(boxstyle='round,pad=0.2', facecolor='white', 
+                                edgecolor='lightgray', alpha=0.9, linewidth=0.5))
+        
+        current_ylim = ax.get_ylim()
+        ax.set_ylim(min(data_min * 1.2, -0.5), y_max_target)
+    
+    # UPDATED LEGEND
+    from matplotlib.lines import Line2D
+    
+    cv_legend_item = Line2D([0], [0], marker='s', color='w', 
+                          markerfacecolor='white', markeredgecolor='lightgray',
+                          markersize=8, label='Coefficient\nof Variation',
+                          linestyle='None')
+    
+    legend_elements = [
+        Line2D([0], [0], marker='D', color='w', markerfacecolor='black', 
+               markersize=8, label='Mean', linestyle='None'),
+        Line2D([0], [0], color='#28a745', linewidth=2, label='Positive median'),
+        Line2D([0], [0], color='#dc3545', linewidth=2, label='Negative median'),
+        Line2D([0], [0], marker='o', color='w', markerfacecolor='black', 
+               markersize=4, alpha=0.6, label='Outlier', linestyle='None'),
+        cv_legend_item
+    ]
+    
+    ax.legend(handles=legend_elements, fontsize=Config.FONT_SIZES['legend'] - 2,
+             loc='upper left', bbox_to_anchor=(1.02, 1))
+    
+    # Panel label
+    ax.text(-0.1, 1.05, 'b', transform=ax.transAxes,
+           fontsize=Config.FONT_SIZES['panel_label'], fontweight='bold',
+           va='top', ha='right')
+    
+    return ax
+    
+def create_plot_all_techniques_single(ax, composite_df, base_method='Base Model'):
+    """Create plot showing all DA techniques (single bars)."""
+    
+    # Get methods (excluding baseline)
+    methods = sorted([m for m in composite_df['DA_Method'].unique() if m != base_method])
+    
+    # Calculate overall mean for each method
+    method_means = composite_df.groupby('DA_Method')['Composite_Score'].mean()
+    method_cis = composite_df.groupby('DA_Method')['CI_95'].mean()
+    
+    # Prepare data
+    means = [method_means.get(method, np.nan) for method in methods]
+    ci_vals = [method_cis.get(method, 0) for method in methods]
+    
+    # Convert to numpy arrays
+    means = np.array(means, dtype=float)
+    ci_vals = np.array(ci_vals, dtype=float)
+    
+    # Clip error bars
+    max_ci = np.nanmax(ci_vals)
+    if max_ci > 0.3 and max_ci > 0:
+        scale_factor = 0.3 / max_ci
+        ci_vals = ci_vals * scale_factor
+    
+    x_pos = np.arange(len(methods))
+    width = 0.7
+    
+    # Plot bars with different colors
+    bars = ax.bar(x_pos, means, width,
+                  color=Config.METHOD_COLORS[:len(methods)], alpha=0.9,
+                  edgecolor='black', linewidth=1.0,
+                  yerr=ci_vals,
+                  error_kw={'ecolor': 'black', 'linewidth': 1.0, 'capsize': 3})
+    
+    ax.set_xticks(x_pos)
+    ax.set_xticklabels(methods, rotation=45, ha='right',
+                      fontsize=Config.FONT_SIZES['tick'])
+    ax.set_ylabel('Composite Score', fontsize=Config.FONT_SIZES['axis'])
+    ax.grid(True, alpha=0.3, axis='y')
+    
+    ax.text(-0.1, 1.05, 'c', transform=ax.transAxes,
+           fontsize=Config.FONT_SIZES['panel_label'], fontweight='bold',
+           va='top', ha='right')
+    
+    return ax
+
+def create_plot_stacked_bars_with_error(ax, composite_df):
+    """Create stacked bar plot with error bars for plot d - FIXED for negative values."""
+    
+    # Get unique methods and architectures from data
+    da_methods = sorted(composite_df['DA_Method'].unique())
+    architectures = sorted(composite_df['Architecture'].unique())
+    
+    # Filter out 'Base Model' if present
+    if 'Base Model' in da_methods:
+        da_methods.remove('Base Model')
+    
+    # Create pivot tables
+    pivot_data = pd.pivot_table(
+        composite_df,
+        index='DA_Method',
+        columns='Architecture',
+        values='Composite_Score',
+        aggfunc='mean',
+        fill_value=0
+    )
+    
+    error_pivot = pd.pivot_table(
+        composite_df,
+        index='DA_Method',
+        columns='Architecture',
+        values='CI_95',
+        aggfunc='mean',
+        fill_value=0
+    )
+    
+    # Remove Base Model if it's in the index
+    if 'Base Model' in pivot_data.index:
+        pivot_data = pivot_data.drop('Base Model')
+    if 'Base Model' in error_pivot.index:
+        error_pivot = error_pivot.drop('Base Model')
+    
+    # Sort methods by total score (descending)
+    pivot_data['Total'] = pivot_data.sum(axis=1)
+    pivot_data = pivot_data.sort_values('Total', ascending=False)
+    pivot_data = pivot_data.drop('Total', axis=1)
+    error_pivot = error_pivot.reindex(pivot_data.index)
+    
+    # Sort columns: PreAct first, then Standard
+    preact_cols = [c for c in pivot_data.columns if 'PreAct' in str(c)]
+    standard_cols = [c for c in pivot_data.columns if 'Standard' in str(c)]
+    other_cols = [c for c in pivot_data.columns if c not in preact_cols + standard_cols]
+    
+    sorted_cols = sorted(preact_cols) + sorted(standard_cols) + sorted(other_cols)
+    pivot_data = pivot_data[sorted_cols]
+    error_pivot = error_pivot[sorted_cols]
+    
+    # Define colors for architectures
+    colors = []
+    color_map = {
+        'PreAct-ResNet18': '#1f77b4',
+        'PreAct-Swin Transformer (Tiny)': '#ff7f0e',
+        'PreAct-MobileNet V3': '#2ca02c',
+        'PreAct-MobileVit_xxs': '#d62728',
+        'Standard-ResNet18': '#9467bd',
+        'Standard-Swin Transformer (Tiny)': '#8c564b',
+        'Standard-MobileNet V3': '#e377c2',
+        'Standard-MobileVit_xxs': '#7f7f7f',
+    }
+    
+    for arch in sorted_cols:
+        if arch in color_map:
+            colors.append(color_map[arch])
+        else:
+            colors.append(plt.cm.tab20(len(colors) % 20))
+    
+    # Plot stacked bars - FIXED FOR NEGATIVE VALUES
+    x_pos = np.arange(len(pivot_data))
+    bar_width = 0.7
+    
+    # Separate bottoms for positive and negative values
+    pos_bottom = np.zeros(len(pivot_data))
+    neg_bottom = np.zeros(len(pivot_data))
+    
+    # Plot each architecture layer
+    for i, (arch, color) in enumerate(zip(sorted_cols, colors)):
+        values = pivot_data[arch].values
+        errors = error_pivot[arch].values
+        
+        # Separate positive and negative values
+        pos_values = np.where(values > 0, values, 0)
+        neg_values = np.where(values < 0, values, 0)
+        
+        # Plot positive values (upward from 0)
+        if np.any(pos_values > 0):
+            ax.bar(x_pos, pos_values, bottom=pos_bottom, width=bar_width,
+                   color=color, alpha=0.9, edgecolor='black', linewidth=0.5,
+                   yerr=errors, error_kw={'ecolor': 'black', 'linewidth': 0.8, 'capsize': 2},
+                   label=arch)
+            pos_bottom += pos_values
+        
+        # Plot negative values (downward from 0)
+        if np.any(neg_values < 0):
+            ax.bar(x_pos, neg_values, bottom=neg_bottom, width=bar_width,
+                   color=color, alpha=0.9, edgecolor='black', linewidth=0.5,
+                   yerr=errors, error_kw={'ecolor': 'black', 'linewidth': 0.8, 'capsize': 2})
+            neg_bottom += neg_values
+    
+    # Add zero line
+    ax.axhline(y=0, color='black', linewidth=0.8, alpha=0.5)
+    
+    # Customize the plot
+    ax.set_xticks(x_pos)
+    
+    # Shorten labels if too long
+    method_labels = pivot_data.index.tolist()
+    display_labels = []
+    for label in method_labels:
+        if len(label) > 25:
+            shortened = (label.replace(' (', '(')
+                         .replace('Horizontal', 'Horiz')
+                         .replace('Vertical', 'Vert')
+                         .replace('Random Erasing', 'RandErase')
+                         .replace('Rotation', 'Rot'))
+            if len(shortened) > 25:
+                shortened = shortened[:22] + '...'
+            display_labels.append(shortened)
+        else:
+            display_labels.append(label)
+    
+    ax.set_xticklabels(display_labels, rotation=45, ha='right', 
+                      fontsize=Config.FONT_SIZES['tick'] - 1)
+    ax.set_ylabel('Composite Score', fontsize=Config.FONT_SIZES['axis'])
+    ax.grid(True, alpha=0.3, axis='y')
+    
+    # Set y-axis limits with proper handling of negative values
+    max_pos_height = pos_bottom.max() if len(pos_bottom) > 0 else 0
+    min_neg_depth = neg_bottom.min() if len(neg_bottom) > 0 else 0
+    y_max = max(0, max_pos_height) * 1.15
+    y_min = min(0, min_neg_depth) * 1.15
+    ax.set_ylim(y_min, y_max)
+    
+    # Create simplified legend for architectures
+    legend_elements = []
+    for i, arch in enumerate(sorted_cols):
+        if np.sum(np.abs(pivot_data[arch].values)) > 0:
+            display_name = arch.replace('PreAct-', 'PreAct- ').replace('Standard-', 'Standard- ')
+            legend_elements.append(
+                Patch(facecolor=colors[i], alpha=0.9, edgecolor='black',
+                      label=display_name)
+            )
+    
+    if legend_elements:
+        ax.legend(handles=legend_elements, fontsize=Config.FONT_SIZES['legend'] - 2,
+                 loc='upper left', bbox_to_anchor=(1.05, 1),
+                 title='Architectures', title_fontsize=Config.FONT_SIZES['legend'] - 2,
+                 ncol=1)
+    
+    ax.text(-0.1, 1.05, 'd', transform=ax.transAxes,
+           fontsize=Config.FONT_SIZES['panel_label'], fontweight='bold',
+           va='top', ha='right')
+    
+    return ax
+
+def create_plot_training_difference(ax, diff_df):
+    """Create plot showing Scratch - Pre-activated difference."""
+    
+    if len(diff_df) == 0:
+        ax.text(0.5, 0.5, 'No data available',
+               ha='center', va='center', transform=ax.transAxes,
+               fontsize=Config.FONT_SIZES['axis'])
+        return ax
+    
+    methods = diff_df['DA_Method'].tolist()
+    differences = diff_df['Difference'].values.astype(float)
+    
+    # Add error bars - using simple calculation
+    errors = np.abs(differences) * 0.1  # Simple error estimate
+    
+    # Clip error bars
+    max_error = np.nanmax(errors)
+    if max_error > 0.3 and max_error > 0:
+        scale_factor = 0.3 / max_error
+        errors = errors * scale_factor
+    
+    x_pos = np.arange(len(methods))
+    
+    # Color based on sign of difference
+    colors = ['#2ca02c' if diff >= 0 else '#d62728' for diff in differences]
+    
+    # Plot bars with error bars
+    bars = ax.bar(x_pos, differences, color=colors, alpha=0.9,
+                  edgecolor='black', linewidth=1.0,
+                  yerr=errors,
+                  error_kw={'ecolor': 'black', 'linewidth': 1.0, 'capsize': 3})
+    
+    ax.axhline(y=0, color='black', linestyle='-', alpha=0.5, linewidth=0.8)
+    
+    ax.set_xticks(x_pos)
+    ax.set_xticklabels(methods, rotation=45, ha='right',
+                      fontsize=Config.FONT_SIZES['tick'])
+    ax.set_ylabel('Difference (Standard - PreAct)', 
+                 fontsize=Config.FONT_SIZES['axis'])
+    ax.grid(True, alpha=0.3, axis='y')
+    
+    # FIXED LEGEND: Correct labels
+    legend_elements = [
+        Patch(facecolor='#2ca02c', edgecolor='black', 
+              linewidth=1.0, label='Standard better'),
+        Patch(facecolor='#d62728', edgecolor='black',
+              linewidth=1.0, label='PreAct better')
+    ]
+    ax.legend(handles=legend_elements, fontsize=Config.FONT_SIZES['legend'],
+             title='Performance', title_fontsize=Config.FONT_SIZES['legend'] - 1)
+    
+    # FIXED: Set symmetric y-limits
+    max_abs_val = max(np.abs(differences)) * 1.1
+    ax.set_ylim(-max_abs_val, max_abs_val)
+    
+    ax.text(-0.1, 1.05, 'e', transform=ax.transAxes,
+           fontsize=Config.FONT_SIZES['panel_label'], fontweight='bold',
+           va='top', ha='right')
+    
+    return ax
+
+def create_plot_circular_ranking(ax, total_scores, best_method, baseline_method):
+    """
+    Create circular ranking plot showing overall performance - EXACTLY matching create_subplot_d from Code A
+    but with adjusted ring size to match plot d's appearance.
+    """
+    
+    methods = total_scores['Method'].tolist()
+    scores = total_scores['Total_Score'].tolist()
+    n_methods = len(methods)
+
+    colors = generate_unique_colors(n_methods)
+    method_colors = dict(zip(methods, colors))
+
+    min_score = min(scores)
+    max_score = max(scores)
+    
+    normalized_scores = [
+        (s - min_score) / (max_score - min_score) * 0.8 + 0.1
+        for s in scores
+    ]
+
+    angles = np.linspace(0, 2 * np.pi, n_methods, endpoint=False)
+    width = 2 * np.pi / n_methods * 0.85
+
+    # OUTER CIRCULAR RING (SOLID)
+    theta_ring = np.linspace(0, 2 * np.pi, 600)
+    ax.plot(
+        theta_ring,
+        np.ones_like(theta_ring),
+        linestyle='-',
+        linewidth=1.6,
+        color='black',
+        alpha=0.9,
+        zorder=2
+    )
+
+    ax.bar(
+        angles,
+        normalized_scores,
+        width=width,
+        color=colors,
+        alpha=0.9,
+        edgecolor='white',
+        linewidth=1.5,
+        zorder=3
+    )
+
+    ax.set_theta_zero_location('N')
+    ax.set_theta_direction(-1)
+
+    # ANGLE LABELS (THETA TICKS)
+    angle_deg = np.arange(0, 360, 45)  # 0°, 45°, ..., 315°
+    ax.set_xticks(np.deg2rad(angle_deg))
+    ax.set_xticklabels([f"{d}\N{DEGREE SIGN}" for d in angle_deg],
+                       fontsize=Config.FONT_SIZES['tick'] - 1)
+
+    # Adjust Y-lim for larger ring
+    ax.set_ylim(0, 1.1)
+    
+    ax.set_yticklabels([])
+    ax.spines['polar'].set_visible(False)
+
+    ax.text(-0.20, 1.00, 'f', transform=ax.transAxes,
+            fontsize=Config.FONT_SIZES['panel_label'], fontweight='bold',
+            va='top', ha='right')
+
+    # Create legend elements
+    legend_elements = [
+        Patch(
+            facecolor=method_colors[method],
+            edgecolor='black',
+            alpha=0.85,
+            label=method
+        )
+        for method in methods
+    ]
+
+    # Place legend BELOW the polar plot
+    n_cols = min(4, max(2, (n_methods + 3) // 4))
+
+    legend = ax.legend(
+        handles=legend_elements,
+        loc='upper center',
+        bbox_to_anchor=(0.5, -0.1),
+        fontsize=Config.FONT_SIZES['legend'] - 2,
+        frameon=True,
+        framealpha=0.95,
+        fancybox=True,
+        title='',
+        ncol=n_cols
+    )
+
+    legend.get_frame().set_alpha(0.9)
+
+    return legend
+
+# ============================================================================
+# FUNCTION TO CALCULATE PLOT 5 DATA 
+# ============================================================================
+def calculate_plot5_data(df, baseline_method='Base Model'):
+    """Calculate data for Plot 5: Overall Performance Ranking """
+    total_scores = df.groupby('DA_Method')['Composite_Score'].sum().reset_index()
+    total_scores.columns = ['Method', 'Total_Score']
+    total_scores = total_scores.sort_values('Total_Score', ascending=True)
+    
+    non_baseline = total_scores[total_scores['Method'] != baseline_method]
+    best_method = non_baseline.iloc[-1]['Method'] if len(non_baseline) > 0 else baseline_method
+    
+    return total_scores, best_method
+
+# ============================================================================
+# PRINT RESULTS FUNCTIONS - STRICTLY DATA ONLY
+# ============================================================================
+def print_plot_a_data(heatmap_data):
+    """Print heatmap data for Plot A"""
+    print("\n" + "="*80)
+    print("PLOT A DATA: IMPROVEMENT HEATMAP")
+    print("="*80)
+    print("\nComposite Scores (Method × Architecture):")
+    print("-"*80)
+    with pd.option_context('display.max_rows', None, 'display.max_columns', None,
+                          'display.width', 1000, 'display.float_format', '{:+.3f}'.format):
+        print(heatmap_data)
+
+def print_plot_b_data(composite_df):
+    """Print box plot data for Plot B"""
+    print("\n" + "="*80)
+    print("PLOT B DATA: GENERALIZATION BOX PLOT")
+    print("="*80)
+    
+    methods = sorted([m for m in composite_df['DA_Method'].unique() if m != 'Base Model'])
+    
+    print("\nMethod Performance Data:")
+    print("-"*80)
+    
+    # Calculate statistics for each method
+    stats_list = []
+    for method in methods:
+        method_data = composite_df[composite_df['DA_Method'] == method]
+        scores = method_data['Composite_Score'].values
+        
+        if len(scores) > 0:
+            stats = {
+                'Method': method,
+                'N': len(scores),
+                'Mean': np.mean(scores),
+                'Median': np.median(scores),
+                'Std': np.std(scores),
+                'Min': np.min(scores),
+                'Max': np.max(scores),
+                'Range': np.max(scores) - np.min(scores),
+                'Q1': np.percentile(scores, 25),
+                'Q3': np.percentile(scores, 75),
+                'IQR': np.percentile(scores, 75) - np.percentile(scores, 25),
+                'CV': np.std(scores) / np.mean(scores) if np.mean(scores) != 0 else 0
+            }
+            stats_list.append(stats)
+    
+    # Convert to DataFrame
+    stats_df = pd.DataFrame(stats_list)
+    stats_df = stats_df.sort_values('Mean', ascending=False)
+    
+    print("\nDetailed Method Statistics:")
+    print("-"*80)
+    with pd.option_context('display.max_rows', None, 'display.width', 1000):
+        print(stats_df.to_string(index=False, float_format=lambda x: f"{x:.3f}" if abs(x) < 1000 else f"{x:.1f}"))
+    
+    # Raw data for box plot
+    print("\nRaw Data for Box Plot (Composite Scores by Method):")
+    print("-"*80)
+    for method in methods:
+        scores = composite_df[composite_df['DA_Method'] == method]['Composite_Score'].values
+        print(f"\n{method}:")
+        print(f"  Scores: {', '.join([f'{x:.3f}' for x in scores])}")
+
+def print_plot_c_data(composite_df):
+    """Print bar plot data for Plot C"""
+    print("\n" + "="*80)
+    print("PLOT C DATA: ALL TECHNIQUES SINGLE BARS")
+    print("="*80)
+    
+    # Calculate method statistics
+    method_stats = composite_df.groupby('DA_Method')['Composite_Score'].agg([
+        'mean', 'std', 'count', 'min', 'max'
+    ]).round(3)
+    method_stats.columns = ['Mean', 'Std', 'Count', 'Min', 'Max']
+    method_stats['SEM'] = method_stats['Std'] / np.sqrt(method_stats['Count'])
+    method_stats['CI_95'] = 1.96 * method_stats['SEM']
+    
+    # Remove Base Model if present
+    if 'Base Model' in method_stats.index:
+        method_stats = method_stats.drop('Base Model')
+    
+    method_stats = method_stats.sort_values('Mean', ascending=False)
+    
+    print("\nMethod Performance Statistics:")
+    print("-"*80)
+    with pd.option_context('display.max_rows', None, 'display.width', 1000):
+        print(method_stats.to_string(float_format=lambda x: f"{x:.3f}" if abs(x) < 1000 else f"{x:.1f}"))
+
+def print_plot_d_data(composite_df):
+    """Print stacked bar data for Plot D"""
+    print("\n" + "="*80)
+    print("PLOT D DATA: STACKED BARS WITH ERROR")
+    print("="*80)
+    
+    # Create pivot tables
+    da_methods = sorted([m for m in composite_df['DA_Method'].unique() if m != 'Base Model'])
+    
+    # Composite scores by method and architecture
+    pivot_mean = pd.pivot_table(
+        composite_df[composite_df['DA_Method'] != 'Base Model'],
+        index='DA_Method',
+        columns='Architecture',
+        values='Composite_Score',
+        aggfunc='mean',
+        fill_value=0
+    )
+    
+    pivot_std = pd.pivot_table(
+        composite_df[composite_df['DA_Method'] != 'Base Model'],
+        index='DA_Method',
+        columns='Architecture',
+        values='Composite_Score',
+        aggfunc='std',
+        fill_value=0
+    )
+    
+    print("\nMean Composite Scores by Method and Architecture:")
+    print("-"*80)
+    with pd.option_context('display.max_rows', None, 'display.max_columns', None,
+                          'display.width', 1000, 'display.float_format', '{:+.3f}'.format):
+        print(pivot_mean)
+    
+    print("\nStandard Deviation by Method and Architecture:")
+    print("-"*80)
+    with pd.option_context('display.max_rows', None, 'display.max_columns', None,
+                          'display.width', 1000, 'display.float_format', '{:+.3f}'.format):
+        print(pivot_std)
+
+def print_plot_e_data(diff_df, composite_df):
+    """Print training difference data for Plot E"""
+    print("\n" + "="*80)
+    print("PLOT E DATA: TRAINING DIFFERENCE")
+    print("="*80)
+    
+    if len(diff_df) == 0:
+        print("\nNo data available for training difference analysis.")
+        return
+    
+    print("\nTraining Difference Statistics:")
+    print("-"*80)
+    diff_df['Abs_Difference'] = np.abs(diff_df['Difference'])
+    diff_df = diff_df.sort_values('Difference', ascending=False)
+    
+    with pd.option_context('display.max_rows', None, 'display.width', 1000):
+        print(diff_df.to_string(index=False, float_format=lambda x: f"{x:.3f}"))
+    
+    # Raw data for training difference
+    print("\nRaw Training Data for Each Method:")
+    print("-"*80)
+    
+    methods = diff_df['DA_Method'].tolist()
+    for method in methods:
+        preact_data = composite_df[(composite_df['DA_Method'] == method) & 
+                                  (composite_df['Training_Type'] == 'preactivated')]['Composite_Score'].values
+        scratch_data = composite_df[(composite_df['DA_Method'] == method) & 
+                                   (composite_df['Training_Type'] == 'scratch')]['Composite_Score'].values
+        
+        print(f"\n{method}:")
+        print(f"  PreAct scores: {', '.join([f'{x:.3f}' for x in preact_data])}")
+        print(f"  Standard scores: {', '.join([f'{x:.3f}' for x in scratch_data])}")
+        if len(preact_data) > 0 and len(scratch_data) > 0:
+            diff = np.mean(scratch_data) - np.mean(preact_data)
+            print(f"  Difference (Standard - PreAct): {diff:.3f}")
+
+def print_plot_f_data(plot5_data, best_method):
+    """Print circular ranking data for Plot F"""
+    print("\n" + "="*80)
+    print("PLOT F DATA: CIRCULAR RANKING")
+    print("="*80)
+    
+    # Sort by Total_Score for ranking
+    ranking_df = plot5_data.sort_values('Total_Score', ascending=False).reset_index(drop=True)
+    ranking_df['Rank'] = ranking_df.index + 1
+    
+    print("\nOverall Performance Ranking:")
+    print("-"*80)
+    with pd.option_context('display.max_rows', None, 'display.width', 1000):
+        print(ranking_df[['Rank', 'Method', 'Total_Score']].to_string(index=False, 
+                                                                    float_format=lambda x: f"{x:.3f}"))
+
+def print_dataset_summary(combined_df, composite_df):
+    """Print dataset summary only"""
+    print("\n" + "="*80)
+    print("DATASET SUMMARY")
+    print("="*80)
+    
+    print(f"\nDataset Statistics:")
+    print(f"  Total experiments: {len(composite_df)}")
+    print(f"  Data augmentation methods: {composite_df['DA_Method'].nunique()}")
+    print(f"  Neural network architectures: {composite_df['Architecture'].nunique()}")
+    print(f"  Training strategies: {composite_df['Training_Type'].nunique()}")
+    
+    print(f"\nOverall Composite Score Statistics:")
+    print(f"  Mean: {composite_df['Composite_Score'].mean():.3f}")
+    print(f"  Standard deviation: {composite_df['Composite_Score'].std():.3f}")
+    print(f"  Median: {composite_df['Composite_Score'].median():.3f}")
+    print(f"  Minimum: {composite_df['Composite_Score'].min():.3f}")
+    print(f"  Maximum: {composite_df['Composite_Score'].max():.3f}")
+    print(f"  Range: {composite_df['Composite_Score'].max() - composite_df['Composite_Score'].min():.3f}")
+
+# ============================================================================
+# MAIN FUNCTION WITH DATA PRINTING 
+# ============================================================================
+def create_generalization_analysis_figure():
+    """Create comprehensive 6-panel figure for generalization analysis."""
+    
+    print("="*60)
+    print("GENERALIZATION ANALYSIS PIPELINE")
+    print("="*60)
+    
+    # Load data
+    print("\n1. Loading data...")
+    preact_df = load_improvement_data_corrected(Config.PREACT_RESULTS_PATH, 'preactivated')
+    scratch_df = load_improvement_data_corrected(Config.SCRATCH_RESULTS_PATH, 'scratch')
+    
+    # Check for consistent methods
+    preact_methods = set(preact_df['DA_Method'].unique())
+    scratch_methods = set(scratch_df['DA_Method'].unique())
+    
+    print(f"\nMethod comparison:")
+    print(f"  Pre-activated methods: {len(preact_methods)}")
+    print(f"  Scratch methods: {len(scratch_methods)}")
+    print(f"  Common methods: {len(preact_methods.intersection(scratch_methods))}")
+    
+    # Combine data
+    combined_df = combine_preact_and_scratch(preact_df, scratch_df)
+    
+    print(f"\n2. Data loaded successfully:")
+    print(f"   - Pre-activated samples: {len(preact_df)}")
+    print(f"   - From-scratch samples: {len(scratch_df)}")
+    print(f"   - Total samples: {len(combined_df)}")
+    print(f"   - Unique methods: {combined_df['DA_Method'].nunique()}")
+    print(f"   - Unique architectures: {combined_df['Architecture'].nunique()}")
+    
+    # Calculate composite scores
+    print("\n3. Calculating composite scores...")
+    composite_df = calculate_composite_score(combined_df)
+    
+    print(f"\nComposite scores calculated:")
+    print(f"   - Total rows: {len(composite_df)}")
+    print(f"   - Methods with data: {composite_df['DA_Method'].nunique()}")
+    print(f"   - Architectures: {composite_df['Architecture'].nunique()}")
+    
+    # Perform analyses
+    print("\n4. Performing statistical analyses...")
+    
+    # Calculate heatmap data
+    heatmap_data = calculate_improvement_heatmap(composite_df)
+    
+    # Calculate other statistics
+    method_summary = calculate_method_performance_summary(composite_df)
+    arch_summary = calculate_architecture_comparison(composite_df)
+    diff_df = calculate_training_difference(composite_df)
+    
+    # Calculate plot 5 data 
+    print("\n5. Calculating plot 5 data for circular ranking...")
+    plot5_data, best_method = calculate_plot5_data(composite_df)
+    
+    # ============================================================================
+    # PRINT ALL DATA FOR PLOTS
+    # ============================================================================
+    
+    print("\n" + "="*100)
+    print("PRINTING DATA FOR ALL PLOTS")
+    print("="*100)
+    
+    # Print dataset summary
+    print_dataset_summary(combined_df, composite_df)
+    
+    # Print data for each plot
+    print_plot_a_data(heatmap_data)
+    print_plot_b_data(composite_df)
+    print_plot_c_data(composite_df)
+    print_plot_d_data(composite_df)
+    print_plot_e_data(diff_df, composite_df)
+    print_plot_f_data(plot5_data, best_method)
+    
+    # Set up plotting style
+    plt.rcParams.update({
+        'font.family': 'Arial',
+        'font.size': Config.FONT_SIZES['tick'],
+        'axes.titlesize': Config.FONT_SIZES['title'],
+        'axes.labelsize': Config.FONT_SIZES['axis'],
+        'xtick.labelsize': Config.FONT_SIZES['tick'],
+        'ytick.labelsize': Config.FONT_SIZES['tick'],
+        'legend.fontsize': Config.FONT_SIZES['legend'],
+        'axes.linewidth': 0.8,
+        'grid.linewidth': 0.5,
+        'lines.linewidth': 0.8,
+        'patch.linewidth': 0.8,
+    })
+    
+    # Create figure with 3x2 grid for 6 panels
+    fig_width = Config.DOUBLE_COLUMN_WIDTH
+    fig_height = Config.FIG_HEIGHT
+    
+    fig = plt.figure(figsize=(fig_width, fig_height), dpi=Config.DPI)
+    
+    # Create a 3x2 grid for 6 panels
+    gs = fig.add_gridspec(3, 2, 
+                         height_ratios=[1, 1, 1],
+                         hspace=0.4, wspace=0.4,
+                         left=0.12, right=0.98,
+                         top=0.95, bottom=0.08)
+    
+    # Create subplots for all 6 panels
+    ax1 = fig.add_subplot(gs[0, 0])  # Row 1, Col 1: Improvement heatmap
+    ax2 = fig.add_subplot(gs[0, 1])  # Row 1, Col 2: Generalization box plot
+    ax3 = fig.add_subplot(gs[1, 0])  # Row 2, Col 1: All techniques (single)
+    ax4 = fig.add_subplot(gs[1, 1])  # Row 2, Col 2: Stacked bars
+    ax5 = fig.add_subplot(gs[2, 0])  # Row 3, Col 1: Training difference
+    ax6 = fig.add_subplot(gs[2, 1], projection='polar')  # Row 3, Col 2: Circular ranking
+    
+    # Create each plot
+    create_plot_improvement_heatmap(ax1, heatmap_data)
+    create_plot_generalization_boxplot(ax2, composite_df)
+    create_plot_all_techniques_single(ax3, composite_df)
+    create_plot_stacked_bars_with_error(ax4, composite_df)
+    create_plot_training_difference(ax5, diff_df)
+    create_plot_circular_ranking(ax6, plot5_data, best_method, 'Base Model')
+
+    # Save figure
+    Config.SAVE_DIR.mkdir(parents=True, exist_ok=True)
+    
+    # Save in multiple formats
+    png_path = Config.SAVE_DIR / "generalization_analysis_6panel.png"
+    plt.savefig(png_path, dpi=Config.DPI, bbox_inches='tight')
+    
+    eps_path = Config.SAVE_DIR / "generalization_analysis_6panel.eps"
+    plt.savefig(eps_path, format='eps', bbox_inches='tight')
+    
+    pdf_path = Config.SAVE_DIR / "generalization_analysis_6panel.pdf"
+    plt.savefig(pdf_path, format='pdf', bbox_inches='tight')
+    
+    tiff_path = Config.SAVE_DIR / "generalization_analysis_6panel.tiff"
+    plt.savefig(tiff_path, format='tiff', dpi=Config.DPI, bbox_inches='tight')
+    
+    print(f"\n✓ 6-panel figure saved to: {Config.SAVE_DIR}")
+    print(f"✓ Figure dimensions: {fig_width:.2f} × {fig_height:.2f} inches")
+    
+    # Save data for verification
+    combined_df.to_csv(Config.SAVE_DIR / "combined_data.csv", index=False)
+    composite_df.to_csv(Config.SAVE_DIR / "composite_scores.csv", index=False)
+    heatmap_data.to_csv(Config.SAVE_DIR / "heatmap_data.csv")
+    method_summary.to_csv(Config.SAVE_DIR / "method_summary.csv")
+    arch_summary.to_csv(Config.SAVE_DIR / "architecture_summary.csv")
+    diff_df.to_csv(Config.SAVE_DIR / "training_differences.csv", index=False)
+    plot5_data.to_csv(Config.SAVE_DIR / "plot5_circular_ranking_data.csv", index=False)
+    
+    print("\n" + "="*60)
+    print("ANALYSIS COMPLETE")
+    print("="*60)
+    
+    plt.show()
+    
+    return fig, {
+        'combined_data': combined_df,
+        'composite_scores': composite_df,
+        'heatmap_data': heatmap_data,
+        'method_summary': method_summary,
+        'architecture_summary': arch_summary,
+        'training_differences': diff_df,
+        'plot5_data': plot5_data,
+        'best_method': best_method
+    }
+
+# ============================================================================
+# EXECUTION
+# ============================================================================
+if __name__ == "__main__":
+    # Create the main figure
+    figure, data = create_generalization_analysis_figure()
