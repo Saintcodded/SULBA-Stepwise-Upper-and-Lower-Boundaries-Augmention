@@ -1,0 +1,302 @@
+import torch
+import random
+
+class SULBA(object):
+    """
+    Universal SULBA Framework for 2D/3D, grayscale/color, classification/segmentation.
+    Works directly with PyTorch transforms and TorchIO subjects.
+    
+    Args:
+        task (str): 'classification' or 'segmentation'. Default: 'classification'.
+        s (int): Step size for cyclic shift. Default: 1.
+        p (float): Probability of applying the transformation. Default: 1.0.
+    """
+    def __init__(self, task='classification', s=1, p=1.0):
+        self.task = task.lower()
+        self.s = s
+        self.p = p
+        
+        if self.task not in ['classification', 'segmentation']:
+            raise ValueError("Task must be 'classification' or 'segmentation'")
+    
+    def __call__(self, *args):
+        """
+        Universal call signature:
+        - For PyTorch classification: __call__(image) -> image
+        - For PyTorch segmentation: __call__(image, mask) -> (image, mask)
+        - For TorchIO classification: __call__(subject) -> subject
+        - For TorchIO segmentation: __call__(subject) -> subject
+        
+        Automatically detects input type and handles appropriately.
+        """
+        if len(args) == 0:
+            raise ValueError("No arguments provided")
+        
+        # Check for TorchIO subject
+        if hasattr(args[0], 'keys') and 'image' in args[0]:
+            return self._apply_to_torchio_subject(args[0])
+        
+        # Check if we should apply transformation
+        if random.random() > self.p:
+            return args[0] if len(args) == 1 else (args[0], args[1])
+        
+        # Handle PyTorch inputs
+        if self.task == 'classification':
+            if len(args) != 1:
+                raise ValueError("Classification expects 1 argument: image")
+            return self._apply_classification(self._ensure_tensor(args[0]))
+        
+        elif self.task == 'segmentation':
+            if len(args) == 1:
+                raise ValueError("Segmentation expects 2 arguments: image, mask")
+            elif len(args) == 2:
+                return self._apply_segmentation(
+                    self._ensure_tensor(args[0]),
+                    self._ensure_tensor(args[1])
+                )
+            else:
+                raise ValueError("Expected 1 or 2 arguments")
+    
+    def _apply_to_torchio_subject(self, subject):
+        """Apply SULBA to a TorchIO subject."""
+        if random.random() > self.p:
+            return subject
+        
+        if self.task == 'classification':
+            image = subject['image'].data
+            image_aug = self._apply_classification(image.squeeze(0))
+            subject['image'].set_data(image_aug.unsqueeze(0))
+        
+        elif self.task == 'segmentation':
+            image = subject['image'].data
+            mask = subject['label'].data
+            image_aug, mask_aug = self._apply_segmentation(
+                image.squeeze(0),
+                mask.squeeze(0)
+            )
+            subject['image'].set_data(image_aug.unsqueeze(0))
+            subject['label'].set_data(mask_aug.unsqueeze(0))
+        
+        return subject
+    
+    def _ensure_tensor(self, x):
+        """Ensure input is a torch Tensor."""
+        if not isinstance(x, torch.Tensor):
+            return torch.tensor(x)
+        return x
+    
+    def _apply_classification(self, image):
+        """Apply SULBA for classification task."""
+        ndim = image.dim()
+        is_grayscale = (image.shape[0] == 1)
+        
+        if ndim == 3:  # 2D: [C, H, W]
+            C, H, W = image.shape
+            
+            if is_grayscale:
+                dim_choice = random.choice(['W', 'H'])
+            else:
+                dim_choice = random.choice(['W', 'H'] + (['C'] if C >= self.s else []))
+            
+            if dim_choice == 'H':
+                step = random.randrange(0, H, self.s)
+                return torch.cat((image[:, step:, :], image[:, :step, :]), 1)
+            elif dim_choice == 'W':
+                step = random.randrange(0, W, self.s)
+                return torch.cat((image[:, :, step:], image[:, :, :step]), 2)
+            else:  # 'C'
+                step = random.randrange(0, C, self.s)
+                return torch.cat((image[step:, :, :], image[:step, :, :]), 0)
+        
+        elif ndim == 4:  # 3D: [C, D, H, W]
+            C, D, H, W = image.shape
+            
+            if is_grayscale:
+                dim_choice = random.choice(['D', 'H', 'W'])
+            else:
+                dim_choice = random.choice(['D', 'H', 'W'] + (['C'] if C >= self.s else []))
+            
+            if dim_choice == 'D':
+                step = random.randrange(0, D, self.s)
+                return torch.cat((image[:, step:, :, :], image[:, :step, :, :]), 1)
+            elif dim_choice == 'H':
+                step = random.randrange(0, H, self.s)
+                return torch.cat((image[:, :, step:, :], image[:, :, :step, :]), 2)
+            elif dim_choice == 'W':
+                step = random.randrange(0, W, self.s)
+                return torch.cat((image[:, :, :, step:], image[:, :, :, :step]), 3)
+            else:  # 'C'
+                step = random.randrange(0, C, self.s)
+                return torch.cat((image[step:, :, :, :], image[:step, :, :, :]), 0)
+        
+        else:
+            raise ValueError(f"Unsupported dimension: {ndim}. Expected 3D [C,H,W] or 4D [C,D,H,W].")
+    
+    def _apply_segmentation(self, image, mask):
+        """Apply SULBA for segmentation task."""
+        ndim = image.dim()
+        is_grayscale = (image.shape[0] == 1)
+        
+        # Prepare mask
+        if ndim == 3:  # 2D
+            if mask.dim() == 2:  # [H, W]
+                mask = mask.unsqueeze(0)  # [1, H, W]
+        elif ndim == 4:  # 3D
+            if mask.dim() == 3:  # [D, H, W]
+                mask = mask.unsqueeze(0)  # [1, D, H, W]
+        
+        if ndim == 3:  # 2D segmentation
+            C, H, W = image.shape
+            
+            if is_grayscale:
+                dim_choice = random.choice(['W', 'H'])
+            else:
+                dim_choice = random.choice(['W', 'H'] + (['C'] if C >= self.s else []))
+            
+            if dim_choice == 'H':
+                step = random.randrange(0, H, self.s)
+                new_image = torch.cat((image[:, step:, :], image[:, :step, :]), 1)
+                new_mask = torch.cat((mask[:, step:, :], mask[:, :step, :]), 1)
+            elif dim_choice == 'W':
+                step = random.randrange(0, W, self.s)
+                new_image = torch.cat((image[:, :, step:], image[:, :, :step]), 2)
+                new_mask = torch.cat((mask[:, :, step:], mask[:, :, :step]), 2)
+            else:  # 'C' (color only)
+                step = random.randrange(0, C, self.s)
+                new_image = torch.cat((image[step:, :, :], image[:step, :, :]), 0)
+                new_mask = mask  # Mask unchanged for channel permutation
+        
+        elif ndim == 4:  # 3D segmentation
+            C, D, H, W = image.shape
+            
+            if is_grayscale:
+                dim_choice = random.choice(['D', 'H', 'W'])
+            else:
+                dim_choice = random.choice(['D', 'H', 'W'] + (['C'] if C >= self.s else []))
+            
+            if dim_choice == 'D':
+                step = random.randrange(0, D, self.s)
+                new_image = torch.cat((image[:, step:, :, :], image[:, :step, :, :]), 1)
+                new_mask = torch.cat((mask[:, step:, :, :], mask[:, :step, :, :]), 1)
+            elif dim_choice == 'H':
+                step = random.randrange(0, H, self.s)
+                new_image = torch.cat((image[:, :, step:, :], image[:, :, :step, :]), 2)
+                new_mask = torch.cat((mask[:, :, step:, :], mask[:, :, :step, :]), 2)
+            elif dim_choice == 'W':
+                step = random.randrange(0, W, self.s)
+                new_image = torch.cat((image[:, :, :, step:], image[:, :, :, :step]), 3)
+                new_mask = torch.cat((mask[:, :, :, step:], mask[:, :, :, :step]), 3)
+            else:  # 'C' (color only)
+                step = random.randrange(0, C, self.s)
+                new_image = torch.cat((image[step:, :, :, :], image[:step, :, :, :]), 0)
+                new_mask = mask  # Mask unchanged for channel permutation
+        
+        else:
+            raise ValueError(f"Unsupported dimension: {ndim}. Expected 3D [C,H,W] or 4D [C,D,H,W].")
+        
+        # Remove channel from mask if single channel
+        if new_mask.shape[0] == 1:
+            new_mask = new_mask.squeeze(0)
+            
+        return new_image, new_mask
+
+
+
+# ========== Example Usage ==========
+import torchvision.transforms as transforms
+import torchvision.transforms.v2 as v2
+import torchio as tio
+
+# ========== Default settings if s and p are not explicitly specified ==========
+s = 1
+p = 1.0
+
+# ========== 2D PyTorch Transforms ==========
+
+# 2D Classification
+transform_2d_cls = transforms.Compose([
+    transforms.Resize((64, 64)), 
+    transforms.ToTensor(),
+    SULBA(task='classification', s=1, p=1.0) 
+])
+
+# 2D Segmentation
+transform_2d_seg = v2.Compose([
+    v2.Resize((64, 64)), 
+    v2.ToTensor(), 
+    SULBA(task='segmentation', s=1, p=1.0)  
+])
+
+# ========== 3D TorchIO Transforms ==========
+
+# 3D Classification
+transform_3d_cls = tio.Compose([
+    tio.Resize((64, 64, 64)),
+    tio.ToCanonical(),
+    tio.ZNormalization(),
+    tio.RescaleIntensity((-1, 1)),
+    SULBA(task='classification', s=1, p=1.0),  
+])
+
+# 3D Segmentation  
+transform_3d_seg = tio.Compose([
+    tio.Resize((64, 64, 64)),
+    tio.ToCanonical(),
+    tio.ZNormalization(),
+    tio.RescaleIntensity((-1, 1)),
+    SULBA(task='segmentation', s=1, p=1.0),  
+])
+
+# ========== Direct Usage ==========
+
+# Direct classification calls
+image_2d = SULBA(task='classification', s=1, p=1.0)(image_2d_tensor)
+image_3d = SULBA(task='classification', s=1, p=1.0)(image_3d_tensor)
+
+# Direct segmentation calls  
+image_2d, mask_2d = SULBA(task='segmentation', s=1, p=1.0)(image_2d_tensor, mask_2d_tensor)
+image_3d, mask_3d = SULBA(task='segmentation', s=1, p=1.0)(image_3d_tensor, mask_3d_tensor)
+
+# Direct TorchIO usage
+subject = SULBA(task='classification', s=1, p=1.0)(torchio_subject)
+subject = SULBA(task='segmentation', s=1, p=1.0)(torchio_subject)
+
+
+# ========== Expected Input Image shape ==========
+# Classification
+#2D Grayscale Classification:
+image.shape = [1, H, W]  # Single channel
+# Example: [1, 224, 224] for 224×224 X-ray
+
+#2D Color Classification (RGB):
+image.shape = [3, H, W]  # Three channels (RGB)
+# Example: [3, 224, 224] for 224×224 dermoscopy image
+
+#3D Grayscale Classification (Volumetric):
+image.shape = [1, D, H, W]  # Single channel, 3D volume
+# Example: [1, 64, 128, 128] for CT/MRI scan
+
+#3D Color Classification (e.g., RGB volumes):
+image.shape = [3, D, H, W]  # Three channels, 3D volume
+# Example: [3, 32, 64, 64] for 3D microscopy
+
+# Segmentation
+#2D Grayscale Segmentation:
+image.shape = [1, H, W]     # Single channel image
+mask.shape  = [H, W]        # OR [1, H, W]
+# Example: image=[1, 256, 256], mask=[256, 256]
+
+#2D Color Segmentation:
+image.shape = [3, H, W]     # RGB image
+mask.shape  = [H, W]        # OR [1, H, W] (single channel mask)
+# Example: image=[3, 256, 256], mask=[256, 256]
+
+#3D Grayscale Segmentation:
+image.shape = [1, D, H, W]  # 3D volume, single channel
+mask.shape  = [D, H, W]     # OR [1, D, H, W]
+# Example: image=[1, 128, 256, 256], mask=[128, 256, 256]
+
+#3D Color Segmentation:
+image.shape = [3, D, H, W]  # 3D RGB volume (rare)
+mask.shape  = [D, H, W]     # OR [1, D, H, W]
+# Example: image=[3, 64, 128, 128], mask=[64, 128, 128]
