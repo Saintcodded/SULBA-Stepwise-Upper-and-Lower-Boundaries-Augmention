@@ -111,17 +111,17 @@ dataloader = DataLoader(
 
 
 ###########################################################################
-#========== 2D Data transforms ==========
+#========== 2D Classification Data transforms ==========
 transform_train = transforms.Compose([
     transforms.Grayscale(num_output_channels=3),   # if image is grayscale and model uses pretrained weights
     #transforms.RandomHorizontalFlip(p = 0.5),
     #transforms.RandomVerticalFlip(p = 0.5),
-    #RandomApply([RandomRotation((-90, 90))], p = 0.5),
+    #RandomApply([RandomRotation((-180, 180))], p = 0.5),
     
     transforms.ToTensor(),
     transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
-    #transforms.RandomErasing(p = 1.0),
-    #Cutout(n_holes=1, length=(IMG_SIZE//4), p=1.0),,
+    #transforms.RandomErasing(p = 0.5),
+    #Cutout(n_holes=1, length=(IMG_SIZE//4), p=0.5),,
     SULBA(task='classification', s=1, p=1.0),
 ])
 
@@ -130,6 +130,122 @@ transform_test = transforms.Compose([
     transforms.ToTensor(),
     transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
 ])
+
+#################################################################
+#========== 2D Segmenation Data transforms ==========
+
+class CutMixBatch(object):
+    """Apply CutMix at the batch level for both images and masks.
+    
+    This implementation follows the true CutMix intuition by working on batches
+    and mixing samples within the batch, while maintaining image-mask consistency.
+    """
+    
+    def __init__(self, alpha=1.0, p=0.5):
+        self.alpha = alpha
+        self.p = p
+        
+    def _get_cutmix_params(self, batch_size, H, W):
+        """Get CutMix parameters for a batch."""
+        lam = torch.distributions.Beta(self.alpha, self.alpha).sample().item()
+        
+        r_x = torch.randint(0, W, (1,)).item()
+        r_y = torch.randint(0, H, (1,)).item()
+        
+        r = 0.5 * math.sqrt(1.0 - lam)
+        r_w_half = int(r * W)
+        r_h_half = int(r * H)
+        
+        x1 = max(0, r_x - r_w_half)
+        y1 = max(0, r_y - r_h_half)
+        x2 = min(W, r_x + r_w_half)
+        y2 = min(H, r_y + r_h_half)
+        
+        indices = torch.randperm(batch_size)
+        
+        return (x1, y1, x2, y2), lam, indices
+    
+    def __call__(self, images, masks):
+        """
+        Apply CutMix to batch with probability p.
+        """
+        if random.random() > self.p:
+            return images, masks
+            
+        batch_size, _, H, W = images.shape
+        
+        # Ensure masks have proper dimensions
+        if masks.dim() == 3:
+            masks = masks.unsqueeze(1)
+        
+        box, lam, indices = self._get_cutmix_params(batch_size, H, W)
+        x1, y1, x2, y2 = box
+        
+        # Create mixed batch
+        mixed_images = images.clone()
+        mixed_masks = masks.clone()
+        
+        # Apply the same CutMix to both images and masks
+        mixed_images[:, :, y1:y2, x1:x2] = images[indices, :, y1:y2, x1:x2]
+        mixed_masks[:, :, y1:y2, x1:x2] = masks[indices, :, y1:y2, x1:x2]
+        
+        return mixed_images, mixed_masks.squeeze(1)
+
+class MixUpBatch(object):
+    """Apply MixUp at the batch level for both images and masks."""
+    
+    def __init__(self, alpha=1.0, p=0.5):
+        self.alpha = alpha
+        self.p = p
+        self.dist = torch.distributions.Beta(alpha, alpha)
+        
+    def _get_mixup_params(self, batch_size):
+        """Get MixUp parameters for a batch."""
+        lam = float(self.dist.sample(()))
+        indices = torch.randperm(batch_size)
+        return lam, indices
+    
+    def __call__(self, images, masks):
+        """
+        Apply MixUp to batch with probability p.
+        """
+        if random.random() > self.p:
+            return images, masks
+            
+        batch_size = images.shape[0]
+        
+        # Ensure masks have proper dimensions
+        if masks.dim() == 3:
+            masks = masks.unsqueeze(1)
+        
+        # Get MixUp parameters
+        lam, indices = self._get_mixup_params(batch_size)
+        
+        # Apply MixUp to images
+        mixed_images = images * lam + images[indices] * (1.0 - lam)
+        
+        # For masks, create a binary choice for each sample
+        # Use the same random decision for all pixels in each sample
+        choice = torch.rand(batch_size, 1, 1, 1, device=images.device) < lam
+        
+        # Use torch.where to select between original and mixed masks
+        # This preserves the integer dtype
+        mixed_masks = torch.where(choice, masks, masks[indices])
+        
+        return mixed_images, mixed_masks.squeeze(1)
+        
+# Create CutMix instance
+cutmix = CutMixBatch(alpha=1.0, p=1.0)
+mixup = MixUpBatch(alpha=1.0, p=1.0)
+
+# Example Usage
+# Apply CutMix at batch level  (can be called within the training loop)
+images, masks = cutmix(images, masks)
+images, masks = mixup(images, masks)
+
+# Add channel dimension if missing (FIX for dimension mismatch)
+if masks.dim() == 3:  # [B, H, W] format
+    masks = masks.unsqueeze(1)  # Convert to [B, 1, H, W]
 
 
 #========== 3D Data transforms ========== (TorchIO transform handles both classification task and segmentation involving mask gracefully)
