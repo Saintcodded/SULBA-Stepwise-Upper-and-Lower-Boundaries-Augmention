@@ -16,8 +16,9 @@ class Config:
     """Configuration settings for generalization analysis"""
     
     # New file paths for pre-activated and from-scratch training
-    PREACT_RESULTS_PATH = r"C:\Users\codde\OneDrive\Desktop\SULBA Paper\Pre activation.xlsx"
-    SCRATCH_RESULTS_PATH = r"C:\Users\codde\OneDrive\Desktop\SULBA Paper\From Scratch.xlsx"
+    #Ensure to use the correct file setup, formatting, and arrangement, an example file is provided within this repository
+    PREACT_RESULTS_PATH = r"C:\SULBA Paper\Pre activation.xlsx"
+    SCRATCH_RESULTS_PATH = r"C:\SULBA Paper\From Scratch.xlsx"
     
     # Save directory
     SAVE_DIR = Path("generalization_analysis_figure")
