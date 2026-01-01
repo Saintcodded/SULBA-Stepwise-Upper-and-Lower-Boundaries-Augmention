@@ -15,7 +15,7 @@ TissueMNIST
 Yang J, Shi R, Wei D, Liu Z, Zhao L, Ke B, Pfister H, Ni B. Medmnist v2-a large-scale lightweight benchmark for 2d and 3d biomedical image classification. Scientific Data. 2023 Jan 19;10(1):41.
 
 chest X-ray pneumonia
-# Datasets Source
+# Dataset Source
 Kermany DS, Goldbaum M, Cai W, Valentim CC, Liang H, Baxter SL, McKeown A, Yang G, Wu X, Yan F, Dong J. Identifying medical diagnoses and treatable diseases by image-based deep learning. cell. 2018 Feb 22;172(5):1122-31.
 
 # 3D Classification Datasets
@@ -36,14 +36,13 @@ DeepbacsMSBench
 FHPsAOPMSBench	
 MosMedPlusMSBench	
 Promise12MSBench	
-
 # Dataset Source
 Kuş Z, Aydin M. MedSegBench: A comprehensive benchmark for medical image segmentation in diverse data modalities. Scientific Data. 2024 Nov 25;11(1):1283.
 
 # 3D Segmentation Datasets
 The medical segmentation decathlon (Tasks = Heart)
 The medical segmentation decathlon (Tasks = Hippocampus) 
-# Dataset Source
+# Datasets Source
 Antonelli M, Reinke A, Bakas S, Farahani K, Kopp-Schneider A, Landman BA, Litjens G, Menze B, Ronneberger O, Summers RM, Van Ginneken B. The medical segmentation decathlon. Nature Communications. 2022 Jul 15;13(1):4128.
 
 IXITiny Dataset
