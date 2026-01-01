@@ -1,6 +1,9 @@
+import torchvision
 from torchvision import models
 from torchvision.models.swin_transformer import Swin_T_Weights
+from torchvision.models.video import swin3d_t, Swin3D_T_Weights
 
+# ========== ResNet18 ==========
 def ResNet18():
     model = models.resnet18(pretrained=True)
     
@@ -37,6 +40,50 @@ def ResNet18():
     
     return model.to(device)
 
+# ========== r3d_18 ==========
+def r3d_18():
+    # Load R3D model for 3D data
+    model = torchvision.models.video.r3d_18(pretrained=True)
+    
+    original_first_conv = model.stem[0]  # R3D uses a stem module
+    
+    # Create new first layer for single channel input
+    new_first_conv = nn.Conv3d(
+        1,  # Single channel for medical images
+        64, 
+        kernel_size=(3, 3, 3), 
+        stride=(1, 1, 1), 
+        padding=(1, 1, 1), 
+        bias=False
+    )
+    
+    # Initialize with pretrained weights
+    with torch.no_grad():
+        # Average the original weights across RGB channels to get single channel weights
+        original_weights = original_first_conv.weight.data
+        avg_weights = original_weights.mean(dim=1, keepdim=True)  # Average across input channels
+        
+        # Interpolate spatial dimensions from 7x7 to 3x3
+        avg_weights = torch.nn.functional.interpolate(
+            avg_weights, 
+            size=(3, 3, 3),  # New kernel size for all dimensions
+            mode='trilinear',  # Use trilinear for 3D interpolation
+            align_corners=False
+        )
+        
+        # Copy to new layer
+        new_first_conv.weight.data = avg_weights
+    
+    # Replace the first convolution in the stem
+    model.stem[0] = new_first_conv
+    
+    # Modify final layer for binary classification
+    num_ftrs = model.fc.in_features
+    model.fc = nn.Linear(num_ftrs, NUM_CLASSES)
+    
+    return model.to(device)
+
+# ========== Swin_Transformer_Tiny ==========
 def Swin_Transformer_Tiny():
     # Load pretrained Swin-Tiny from torchvision
     model = models.swin_t(weights=Swin_T_Weights.IMAGENET1K_V1)
@@ -45,4 +92,62 @@ def Swin_Transformer_Tiny():
     num_features = model.head.in_features
     model.head = nn.Linear(num_features, NUM_CLASSES)
     
+    return model.to(device)
+
+# ========== 3D_Swin_Transformer_Tiny ==========
+def 3D_Swin_Transformer_Tiny(num_classes = NUM_CLASSES):
+    # Load pre-trained Swin Transformer Tiny for 3D data
+    weights = Swin3D_T_Weights.DEFAULT
+    model = swin3d_t(weights=weights)
+    
+    # Find the first Conv3d layer in the entire model
+    def find_first_conv3d(module):
+        for child in module.children():
+            if isinstance(child, nn.Conv3d):
+                return child
+            result = find_first_conv3d(child)
+            if result is not None:
+                return result
+        return None
+    
+    original_conv = find_first_conv3d(model)
+    
+    if original_conv is None:
+        raise ValueError("Could not find Conv3d layer in the model")
+    
+    # Create new first layer for single channel input
+    new_conv = nn.Conv3d(
+        1,  # Single channel for medical images
+        original_conv.out_channels, 
+        kernel_size=original_conv.kernel_size,
+        stride=original_conv.stride, 
+        padding=original_conv.padding, 
+        bias=original_conv.bias is not None
+    )
+    
+    # Initialize with pretrained weights
+    with torch.no_grad():
+        original_weights = original_conv.weight.data
+        avg_weights = original_weights.mean(dim=1, keepdim=True)
+        new_conv.weight.data = avg_weights
+        
+        if original_conv.bias is not None:
+            new_conv.bias.data = original_conv.bias.data
+    
+    # Replace the original convolution
+    def replace_conv3d(module, old_conv, new_conv):
+        for name, child in module.named_children():
+            if child is old_conv:
+                setattr(module, name, new_conv)
+                return True
+            if replace_conv3d(child, old_conv, new_conv):
+                return True
+        return False
+    
+    if not replace_conv3d(model, original_conv, new_conv):
+        raise ValueError("Could not replace Conv3d layer")
+    
+    # Modify final classifier
+    num_ftrs = model.head.in_features
+    model.head = nn.Linear(num_ftrs, NUM_CLASSES)
     return model.to(device)
