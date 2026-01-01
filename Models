@@ -1,0 +1,37 @@
+from torchvision import models
+
+def ResNet18():
+    model = models.resnet18(pretrained=True)
+    
+    # Modify first layer for our input size
+    original_first_conv = model.conv1
+    
+    # Create new first layer with smaller kernel for 64x64 input
+    model.conv1 = nn.Conv2d(3, 64, kernel_size=3, stride=1, padding=1, bias=False)
+    
+    # Initialize with pretrained weights
+    with torch.no_grad():
+        original_weights = original_first_conv.weight.data
+        avg_weights = original_weights.mean(dim=1, keepdim=True)
+        
+        # Interpolate weights from 7x7 to 3x3
+        avg_weights = torch.nn.functional.interpolate(
+            avg_weights, 
+            size=(3, 3), 
+            mode='bilinear', 
+            align_corners=False
+        )
+        
+        # Check if grayscale and adjust weight initialization
+        if model.conv1.weight.data.shape[1] == 1:  # Grayscale (1 channel)
+            # For grayscale: use average of all channels
+            model.conv1.weight.data[:,:1,:,:] = avg_weights
+        else:  # Color (3 channels)
+            # Original logic for 3-channel input
+            model.conv1.weight.data[:,:3,:,:] = avg_weights.repeat(1, 3, 1, 1)
+    
+    # Modify final layer for our number of classes
+    num_ftrs = model.fc.in_features
+    model.fc = nn.Linear(num_ftrs, NUM_CLASSES)
+    
+    return model.to(device)
