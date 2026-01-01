@@ -166,27 +166,6 @@ def r3d_18():
     
     return model
 
-# ========== Swin_Transformer_Tiny ==========
-def Swin_Transformer_Tiny():
-    # Load Swin-Tiny WITHOUT pretrained weights
-    model = models.swin_t(weights=None)  # No pretrained weights
-    
-    # Modify head for binary classification
-    num_features = model.head.in_features
-    model.head = nn.Linear(num_features, 2)
-    
-    return model
-
-# ========== Swin_Transformer_Tiny (with pretrained weight) ==========
-def Swin_Transformer_Tiny():
-    # Load pretrained Swin-Tiny from torchvision
-    model = models.swin_t(weights=Swin_T_Weights.IMAGENET1K_V1)
-    
-    # Modify head for number of classes
-    num_features = model.head.in_features
-    model.head = nn.Linear(num_features, NUM_CLASSES)
-    
-    return model
 
 # ========== MobileViT_XXS ==========
 def MobileViT_XXS():
@@ -210,6 +189,27 @@ def MobileViT_XXS():
 
     return model
 
+# ========== Swin_Transformer_Tiny ==========
+def Swin_Transformer_Tiny():
+    # Load Swin-Tiny WITHOUT pretrained weights
+    model = models.swin_t(weights=None)  # No pretrained weights
+    
+    # Modify head for binary classification
+    num_features = model.head.in_features
+    model.head = nn.Linear(num_features, 2)
+    
+    return model
+
+# ========== Swin_Transformer_Tiny (with pretrained weight) ==========
+def Swin_Transformer_Tiny():
+    # Load pretrained Swin-Tiny from torchvision
+    model = models.swin_t(weights=Swin_T_Weights.IMAGENET1K_V1)
+    
+    # Modify head for number of classes
+    num_features = model.head.in_features
+    model.head = nn.Linear(num_features, NUM_CLASSES)
+    
+    return model
 
 # ========== 3D_Swin_Transformer_Tiny ==========
 def 3D_Swin_Transformer_Tiny(num_classes = NUM_CLASSES):
