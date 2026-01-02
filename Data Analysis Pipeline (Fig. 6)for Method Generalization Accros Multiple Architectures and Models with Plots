@@ -16,7 +16,7 @@ class Config:
     """Configuration settings for generalization analysis"""
     
     # New file paths for pre-activated and from-scratch training
-    #Ensure to use the correct file setup, formatting, and arrangement, an example file is provided within this repository
+    #Ensure to use the correct file setup, formatting, and arrangement, an example file with the name "From Scratch" is provided within this repository
     PREACT_RESULTS_PATH = r"C:\SULBA Paper\Pre activation.xlsx"
     SCRATCH_RESULTS_PATH = r"C:\SULBA Paper\From Scratch.xlsx"
     
