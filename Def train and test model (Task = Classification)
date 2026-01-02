@@ -11,7 +11,7 @@ from sklearn.metrics import (accuracy_score, roc_auc_score, f1_score, classifica
 # ========== Train Model (Task = Classification) ==========
 def train_model(model, train_loader, val_loader):
     criterion = nn.CrossEntropyLoss()
-    optimizer = optim.AdamW(model.parameters(), lr=LEARNING_RATE, fused=True)
+    optimizer = optim.AdamW(model.parameters(), lr=LEARNING_RATE)
     scaler = torch.cuda.amp.GradScaler()
 
     best_val_acc = 0.0
